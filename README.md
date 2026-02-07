@@ -11,6 +11,7 @@ A reimplementation of kallisto, an RNA-seq quantification tool, in C. This is a 
 - **Pseudoalignment**: Maps reads to transcripts using k-mer matching
 - **Equivalence Classes**: Groups reads by their compatible transcripts
 - **EM Algorithm**: Estimates transcript abundances using the EM algorithm
+- **Multi-threading Support**: Uses kthread.h for parallel computation in EM algorithm
 - **Command-line Interface**: Full argument parsing with help and version info
 - **TSV Output**: Produces standard kallisto-compatible output format
 
@@ -19,6 +20,7 @@ A reimplementation of kallisto, an RNA-seq quantification tool, in C. This is a 
 ### Prerequisites
 - GCC compiler (or compatible C compiler)
 - zlib development library (for gzipped file support)
+- pthread library (for multi-threading support)
 - Make (optional, for using Makefile)
 
 On Ubuntu/Debian:
@@ -40,7 +42,7 @@ make
 
 Or manually:
 ```bash
-gcc -Wall -Wextra -O2 -o kallisto kallisto.c -lm -lz
+gcc -Wall -Wextra -O2 -o kallisto kallisto.c kthread.c -lm -lz -lpthread
 gcc -Wall -Wextra -O2 -o binary_convert Binary_convert.c
 ```
 
@@ -57,6 +59,9 @@ gcc -Wall -Wextra -O2 -o binary_convert Binary_convert.c
 
 # Gzipped files (automatically detected)
 ./kallisto -i transcriptome.fasta.gz -r reads.fastq.gz -o output.tsv
+
+# Use multiple threads for faster processing
+./kallisto -i transcriptome.fasta -r reads.fasta -o output.tsv -t 4
 ```
 
 ### Command-line Options
@@ -71,6 +76,7 @@ Optional arguments:
   -k, --kmer-size <int>     K-mer size (default: 31)
   -e, --epsilon <float>     EM convergence threshold (default: 0.01)
   -m, --max-reads <int>     Maximum number of reads to process (default: all)
+  -t, --threads <int>       Number of threads (default: 1)
   -h, --help                Display help message
   -v, --version             Display version information
 ```
@@ -170,6 +176,10 @@ transcript2  1500      1500          200.00        66666.6667
 - **FASTQ support**: Can now process FASTQ files in addition to FASTA
 - **Gzipped file support**: Direct reading of .gz compressed files
 - **Dynamic hash table sizing**: Hash table size automatically scales based on k-mer count (load factor ~0.7)
+- **Multi-threading support**: Integrated kthread.h for parallel computation in EM algorithm
+  - Parallelized update_alphas function across transcripts
+  - Parallelized update_trans_probs function across equivalence classes
+  - Thread count configurable via -t/--threads option
 - Fixed critical memory bugs (boundary conditions, allocation errors)
 - Added comprehensive error checking for all file operations
 - Implemented proper memory management (fixed memory leaks)

@@ -14,6 +14,9 @@
 #include <zlib.h>
 #include "kseq.h"
 
+// Declare kt_for() function from kthread.c
+void kt_for(int n_threads, void (*func)(void*,long,int), void *data, long n);
+
 // Initialize kseq for FILE* reading
 KSEQ_INIT(gzFile, gzread)
 
@@ -59,6 +62,14 @@ void update_trans_probs(double *probs, double **transcirpt_prob);
 double **alloc_matrix(int n, int r);
 double likelihood(double *alpha, int *lengths);
 
+// Data structure for parallel computation
+typedef struct {
+	double *alpha;
+	double **transcript_prob;
+	double *probs;
+	int *lengths;
+} em_data_t;
+
 // Global variables
 kmer_labeled **hashTable;
 eq_c_count *eqc_arr;
@@ -74,6 +85,7 @@ int num_eqc_found;
 char ** t_names;
 int * t_lengths;
 char * g_output_file = NULL;  // Global output file path
+int n_threads = 1;  // Default number of threads
 
 void print_usage(const char *prog_name) {
 	fprintf(stderr, "kallisto C implementation v%s\n\n", VERSION);
@@ -86,6 +98,7 @@ void print_usage(const char *prog_name) {
 	fprintf(stderr, "  -k, --kmer-size <int>     K-mer size (default: 31)\n");
 	fprintf(stderr, "  -e, --epsilon <float>     EM convergence threshold (default: 0.01)\n");
 	fprintf(stderr, "  -m, --max-reads <int>     Maximum number of reads to process (default: all)\n");
+	fprintf(stderr, "  -t, --threads <int>       Number of threads (default: 1)\n");
 	fprintf(stderr, "  -h, --help                Display this help message\n");
 	fprintf(stderr, "  -v, --version             Display version information\n\n");
 }
@@ -109,6 +122,7 @@ int main(int argc, char *argv[])
 		{"kmer-size",  required_argument, 0, 'k'},
 		{"epsilon",    required_argument, 0, 'e'},
 		{"max-reads",  required_argument, 0, 'm'},
+		{"threads",    required_argument, 0, 't'},
 		{"help",       no_argument,       0, 'h'},
 		{"version",    no_argument,       0, 'v'},
 		{0, 0, 0, 0}
@@ -117,7 +131,7 @@ int main(int argc, char *argv[])
 	int opt;
 	int option_index = 0;
 	
-	while ((opt = getopt_long(argc, argv, "i:r:o:k:e:m:hv", long_options, &option_index)) != -1) {
+	while ((opt = getopt_long(argc, argv, "i:r:o:k:e:m:t:hv", long_options, &option_index)) != -1) {
 		switch (opt) {
 			case 'i':
 				index_file = optarg;
@@ -149,6 +163,13 @@ int main(int argc, char *argv[])
 					return 1;
 				}
 				break;
+			case 't':
+				n_threads = atoi(optarg);
+				if (n_threads <= 0) {
+					fprintf(stderr, "Error: threads must be positive\n");
+					return 1;
+				}
+				break;
 			case 'h':
 				print_usage(argv[0]);
 				return 0;
@@ -177,6 +198,7 @@ int main(int argc, char *argv[])
 	printf("Output file: %s\n", output_file);
 	printf("K-mer size:  %d\n", k);
 	printf("Epsilon:     %f\n", epsilon);
+	printf("Threads:     %d\n", n_threads);
 	printf("\n");
 
 	create_htable(index_file);
@@ -697,6 +719,39 @@ uint32_t murmurhash (const char *key, uint32_t len, uint32_t seed) {
 }
 
 
+// Parallel worker function for update_alphas
+static void worker_update_alphas(void *data, long k, int tid) {
+	(void)tid; // Unused parameter
+	em_data_t *em_data = (em_data_t*)data;
+	double sum = 0;
+	
+	for(int i = 1; i < num_eqc_found; i++){
+		// KSD correction: multiply by count
+		sum += eqc_arr[i].count * em_data->transcript_prob[i][k];
+	}
+	
+	em_data->alpha[k] = sum/num_eqc_found;
+}
+
+// Parallel worker function for update_trans_probs
+static void worker_update_trans_probs(void *data, long idx, int tid) {
+	(void)tid; // Unused parameter
+	em_data_t *em_data = (em_data_t*)data;
+	long i = idx + 1; // Offset by 1 since we start from 1
+	int j = 0;
+	double sum = 0;
+	
+	// Iterate the transcripts
+	// Here we are adding the prbability of a specific equivalence class
+	while(eqc_arr[i].eq_class_labels[j] != -1){
+		sum += em_data->probs[eqc_arr[i].eq_class_labels[j]];
+		j++;
+	}
+	
+	for(int k = 0; k < j; k++)
+		em_data->transcript_prob[i][eqc_arr[i].eq_class_labels[k]] = em_data->probs[eqc_arr[i].eq_class_labels[k]] / sum;
+}
+
 // This is our implementation of the EM algorithm
 void EM(int *lengths, double eps){
 
@@ -760,16 +815,20 @@ void EM(int *lengths, double eps){
 
 // This methods update the alphas for each of the transcripts
 void update_alphas(double *alpha, double **transcirpt_prob){
+	if (n_threads > 1) {
+		em_data_t em_data = {alpha, transcirpt_prob, NULL, NULL};
+		kt_for(n_threads, worker_update_alphas, &em_data, num_t + 1);
+	} else {
+		for(int k = 0; k <= num_t; k++){
+			double sum = 0;
 
-	for(int k = 0; k <= num_t; k++){
-		double sum = 0;
+			for(int i = 1; i < num_eqc_found; i++){
+				// KSD correction: multiply by count
+				sum += eqc_arr[i].count * transcirpt_prob[i][k];
+			}
 
-		for(int i = 1; i < num_eqc_found; i++){
-			// KSD correction: multiply by count
-			sum += eqc_arr[i].count * transcirpt_prob[i][k];
+			alpha[k] = sum/num_eqc_found;
 		}
-
-		alpha[k] = sum/num_eqc_found;
 	}
 }
 
@@ -789,20 +848,27 @@ void update_prob(double *alpha, double *probs, int *lengths){
 
 // Update the transcriptions probabilities
 void update_trans_probs(double *probs, double **transcirpt_prob){
+	if (n_threads > 1) {
+		em_data_t em_data = {NULL, transcirpt_prob, probs, NULL};
+		// Start from 1 because first cell is null
+		kt_for(n_threads, worker_update_trans_probs, &em_data, num_eqc_found - 1);
+		// Note: kt_for processes indices 0 to n-1, but we want 1 to num_eqc_found-1
+		// So we need to adjust the worker function
+	} else {
+		for(int i = 1; i < num_eqc_found; i++){
+			int j = 0;
+			double sum = 0;
 
-	for(int i = 1; i < num_eqc_found; i++){
-		int j = 0;
-		double sum = 0;
+			// Iterate the transcripts
+			// Here we are adding the prbability of a specific equivalence class
+			while(eqc_arr[i].eq_class_labels[j] != -1){
+				sum += probs[eqc_arr[i].eq_class_labels[j]];
+				j++;
+			}
 
-		// Iterate the transcripts
-		// Here we are adding the prbability of a specific equivalence class
-		while(eqc_arr[i].eq_class_labels[j] != -1){
-			sum += probs[eqc_arr[i].eq_class_labels[j]];
-			j++;
+			for(int k = 0; k <= j; k++)
+				transcirpt_prob[i][eqc_arr[i].eq_class_labels[k]] = probs[eqc_arr[i].eq_class_labels[k]] / sum;
 		}
-
-		for(int k = 0; k <= j; k++)
-			transcirpt_prob[i][eqc_arr[i].eq_class_labels[k]] = probs[eqc_arr[i].eq_class_labels[k]] / sum;
 	}
 }
 
