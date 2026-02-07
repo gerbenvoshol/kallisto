@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <getopt.h>
 #include <zlib.h>
+#include <time.h>
 #include "kseq.h"
 
 // Declare kt_for() function from kthread.c
@@ -20,7 +21,7 @@ void kt_for(int n_threads, void (*func)(void*,long,int), void *data, long n);
 // Initialize kseq for FILE* reading
 KSEQ_INIT(gzFile, gzread)
 
-#define VERSION "0.1.0"
+#define VERSION "0.3.0"
 
 typedef struct{
 	char * kmer_seq; // the kmer sequence
@@ -41,6 +42,7 @@ void store_name_idx(char * name, int t_name_idx);
 char** get_kmers(char* seq, int k, int *size);
 void create_htable(char * tscripts_file);
 void store_read_counts(char * reads_file, int max_reads);
+void store_paired_read_counts(char * reads_file1, char * reads_file2, int max_reads);
 int * get_equiv_class(char* kmer);
 void store_eqiv_classes();
 uint32_t murmurhash (const char *key, uint32_t len, uint32_t seed);
@@ -52,9 +54,12 @@ void compare(double *probs);
 void print_usage(const char *prog_name);
 void print_version();
 void write_abundances(const char *output_file, double *probs);
+void write_abundances_with_bootstrap(const char *output_file, double *probs, double **bootstrap_results, int n_bootstrap);
 
 //EM related
 void EM(int *lengths, double eps);
+void run_EM_iteration(int *lengths, double eps, double *probs_out);
+void bootstrap_EM(int *lengths, double eps);
 void update_parameters(double *alpha, double *probs, int *lengths, double **transcirpt_prob);
 void update_alphas(double *alpha, double **transcirpt_prob);
 void update_prob(double *alpha, double *probs, int *lengths);
@@ -81,6 +86,7 @@ int num_t = 125;
 int num_eq_classes;
 int max_line_length = 10000;  // Increased for longer sequences
 int num_eqc_found;
+int bootstrap_samples = 0;  // Number of bootstrap samples (0 = no bootstrap)
 
 char ** t_names;
 int * t_lengths;
@@ -92,13 +98,18 @@ void print_usage(const char *prog_name) {
 	fprintf(stderr, "Usage: %s [options] -i <index> -o <output>\n\n", prog_name);
 	fprintf(stderr, "Required arguments:\n");
 	fprintf(stderr, "  -i, --index <file>        Transcriptome index/reference file (FASTA/FASTQ format)\n");
-	fprintf(stderr, "  -r, --reads <file>        Input reads file (FASTA/FASTQ format, gzipped supported)\n");
 	fprintf(stderr, "  -o, --output <file>       Output file for abundance estimates\n\n");
+	fprintf(stderr, "Single-end mode:\n");
+	fprintf(stderr, "  -r, --reads <file>        Input reads file (FASTA/FASTQ format, gzipped supported)\n\n");
+	fprintf(stderr, "Paired-end mode:\n");
+	fprintf(stderr, "  -1, --reads1 <file>       First reads file (FASTA/FASTQ format, gzipped supported)\n");
+	fprintf(stderr, "  -2, --reads2 <file>       Second reads file (FASTA/FASTQ format, gzipped supported)\n\n");
 	fprintf(stderr, "Optional arguments:\n");
 	fprintf(stderr, "  -k, --kmer-size <int>     K-mer size (default: 31)\n");
 	fprintf(stderr, "  -e, --epsilon <float>     EM convergence threshold (default: 0.01)\n");
 	fprintf(stderr, "  -m, --max-reads <int>     Maximum number of reads to process (default: all)\n");
 	fprintf(stderr, "  -t, --threads <int>       Number of threads (default: 1)\n");
+	fprintf(stderr, "  -b, --bootstrap <int>     Number of bootstrap samples (default: 0)\n");
 	fprintf(stderr, "  -h, --help                Display this help message\n");
 	fprintf(stderr, "  -v, --version             Display version information\n\n");
 }
@@ -109,20 +120,29 @@ void print_version() {
 
 int main(int argc, char *argv[])
 {
+	// Seed random number generator for bootstrap
+	srand(time(NULL));
+	
 	char *index_file = NULL;
 	char *reads_file = NULL;
+	char *reads_file1 = NULL;
+	char *reads_file2 = NULL;
 	char *output_file = NULL;
 	int max_reads = INT_MAX;
 	double epsilon = 0.01;
+	int paired_end = 0;
 	
 	static struct option long_options[] = {
 		{"index",      required_argument, 0, 'i'},
 		{"reads",      required_argument, 0, 'r'},
+		{"reads1",     required_argument, 0, '1'},
+		{"reads2",     required_argument, 0, '2'},
 		{"output",     required_argument, 0, 'o'},
 		{"kmer-size",  required_argument, 0, 'k'},
 		{"epsilon",    required_argument, 0, 'e'},
 		{"max-reads",  required_argument, 0, 'm'},
 		{"threads",    required_argument, 0, 't'},
+		{"bootstrap",  required_argument, 0, 'b'},
 		{"help",       no_argument,       0, 'h'},
 		{"version",    no_argument,       0, 'v'},
 		{0, 0, 0, 0}
@@ -131,13 +151,21 @@ int main(int argc, char *argv[])
 	int opt;
 	int option_index = 0;
 	
-	while ((opt = getopt_long(argc, argv, "i:r:o:k:e:m:t:hv", long_options, &option_index)) != -1) {
+	while ((opt = getopt_long(argc, argv, "i:r:1:2:o:k:e:m:t:b:hv", long_options, &option_index)) != -1) {
 		switch (opt) {
 			case 'i':
 				index_file = optarg;
 				break;
 			case 'r':
 				reads_file = optarg;
+				break;
+			case '1':
+				reads_file1 = optarg;
+				paired_end = 1;
+				break;
+			case '2':
+				reads_file2 = optarg;
+				paired_end = 1;
 				break;
 			case 'o':
 				output_file = optarg;
@@ -170,6 +198,13 @@ int main(int argc, char *argv[])
 					return 1;
 				}
 				break;
+			case 'b':
+				bootstrap_samples = atoi(optarg);
+				if (bootstrap_samples < 0) {
+					fprintf(stderr, "Error: bootstrap samples must be non-negative\n");
+					return 1;
+				}
+				break;
 			case 'h':
 				print_usage(argv[0]);
 				return 0;
@@ -183,8 +218,27 @@ int main(int argc, char *argv[])
 	}
 	
 	// Check required arguments
-	if (!index_file || !reads_file || !output_file) {
+	if (!index_file || !output_file) {
 		fprintf(stderr, "Error: Missing required arguments\n\n");
+		print_usage(argv[0]);
+		return 1;
+	}
+	
+	// Check read file arguments
+	if (paired_end && (!reads_file1 || !reads_file2)) {
+		fprintf(stderr, "Error: Both -1 and -2 must be specified for paired-end mode\n\n");
+		print_usage(argv[0]);
+		return 1;
+	}
+	
+	if (!paired_end && !reads_file) {
+		fprintf(stderr, "Error: Either -r or both -1 and -2 must be specified\n\n");
+		print_usage(argv[0]);
+		return 1;
+	}
+	
+	if (paired_end && reads_file) {
+		fprintf(stderr, "Error: Cannot use both -r and -1/-2 simultaneously\n\n");
 		print_usage(argv[0]);
 		return 1;
 	}
@@ -194,16 +248,30 @@ int main(int argc, char *argv[])
 	
 	printf("Kallisto C implementation v%s\n", VERSION);
 	printf("Index file:  %s\n", index_file);
-	printf("Reads file:  %s\n", reads_file);
+	if (paired_end) {
+		printf("Reads file 1: %s\n", reads_file1);
+		printf("Reads file 2: %s\n", reads_file2);
+		printf("Mode: Paired-end\n");
+	} else {
+		printf("Reads file:  %s\n", reads_file);
+		printf("Mode: Single-end\n");
+	}
 	printf("Output file: %s\n", output_file);
 	printf("K-mer size:  %d\n", k);
 	printf("Epsilon:     %f\n", epsilon);
 	printf("Threads:     %d\n", n_threads);
+	if (bootstrap_samples > 0) {
+		printf("Bootstrap:   %d samples\n", bootstrap_samples);
+	}
 	printf("\n");
 
 	create_htable(index_file);
 
-	store_read_counts(reads_file, max_reads);
+	if (paired_end) {
+		store_paired_read_counts(reads_file1, reads_file2, max_reads);
+	} else {
+		store_read_counts(reads_file, max_reads);
+	}
 	store_eqiv_classes();
 
 	// Freeing the hash table because is not needed for the EM
@@ -502,6 +570,182 @@ void store_read_counts(char * reads_file, int max_reads)
 	printf("Done storing read counts (processed %d reads)! \n\n", reads_processed);
 }
 
+// Helper function to find matching k-mer in hash table and get equivalence class
+int* find_kmer_eq_class(char* seq_str, int seq_len) {
+	if (seq_len < k) {
+		return NULL;
+	}
+	
+	char* read_1kmer = malloc((k + 1) * sizeof(char));
+	if (!read_1kmer) {
+		return NULL;
+	}
+	
+	int k_start = 0;
+	int* eq_class = NULL;
+	
+	// Try multiple k-mers in the sequence
+	while (k_start + k <= seq_len) {
+		strncpy(read_1kmer, seq_str + k_start, k);
+		read_1kmer[k] = '\0';
+		
+		uint32_t h_row = kmer_hash(read_1kmer);
+		int h_col = 0;
+		
+		while (h_col < max_per_row) {
+			if (!hashTable[h_row][h_col].kmer_seq[0]) {
+				// Empty slot, k-mer not found in this position
+				break;
+			}
+			if (strcmp(hashTable[h_row][h_col].kmer_seq, read_1kmer) == 0) {
+				// Found the k-mer, return its equivalence class
+				eq_class = hashTable[h_row][h_col].t_labels;
+				free(read_1kmer);
+				return eq_class;
+			}
+			h_col++;
+		}
+		k_start++;
+	}
+	
+	free(read_1kmer);
+	return NULL;
+}
+
+// Store paired-end read counts
+void store_paired_read_counts(char * reads_file1, char * reads_file2, int max_reads)
+{
+	gzFile fp1 = gzopen(reads_file1, "r");
+	gzFile fp2 = gzopen(reads_file2, "r");
+	
+	if (!fp1) {
+		fprintf(stderr, "Error: Could not open reads file '%s'\n", reads_file1);
+		exit(1);
+	}
+	if (!fp2) {
+		fprintf(stderr, "Error: Could not open reads file '%s'\n", reads_file2);
+		gzclose(fp1);
+		exit(1);
+	}
+	
+	kseq_t *seq1 = kseq_init(fp1);
+	kseq_t *seq2 = kseq_init(fp2);
+	int64_t l1, l2;
+
+	printf("Reading paired-end reads \n");
+
+	int reads_processed = 0;
+	while (reads_processed < max_reads) {
+		l1 = kseq_read(seq1);
+		l2 = kseq_read(seq2);
+		
+		// Check if both reads are available
+		if (l1 < 0 || l2 < 0) {
+			if (l1 >= 0 || l2 >= 0) {
+				fprintf(stderr, "Warning: Unequal number of reads in paired files\n");
+			}
+			break;
+		}
+		
+		reads_processed++;
+		
+		// Get equivalence classes for both reads
+		int* eq_class1 = find_kmer_eq_class(seq1->seq.s, seq1->seq.l);
+		int* eq_class2 = find_kmer_eq_class(seq2->seq.s, seq2->seq.l);
+		
+		// Combine equivalence classes (intersection of transcripts)
+		// If both reads map, use intersection; otherwise use whichever maps
+		if (eq_class1 && eq_class2) {
+			// Find intersection of both equivalence classes
+			int intersection_found = 0;
+			for (int i = 0; i < num_t && eq_class1[i] != -1; i++) {
+				for (int j = 0; j < num_t && eq_class2[j] != -1; j++) {
+					if (eq_class1[i] == eq_class2[j]) {
+						intersection_found = 1;
+						break;
+					}
+				}
+				if (intersection_found) break;
+			}
+			
+			// If intersection exists, increment counts for transcripts in both
+			if (intersection_found) {
+				// For simplicity, we'll use the first read's k-mer that has intersection
+				// This is a simplified approach
+				if ((int)seq1->seq.l >= k) {
+					char* read_1kmer = malloc((k + 1) * sizeof(char));
+					if (read_1kmer) {
+						strncpy(read_1kmer, seq1->seq.s, k);
+						read_1kmer[k] = '\0';
+						
+						uint32_t h_row = kmer_hash(read_1kmer);
+						int h_col = 0;
+						
+						while (h_col < max_per_row && hashTable[h_row][h_col].kmer_seq[0]) {
+							if (strcmp(hashTable[h_row][h_col].kmer_seq, read_1kmer) == 0) {
+								hashTable[h_row][h_col].from_reads++;
+								break;
+							}
+							h_col++;
+						}
+						free(read_1kmer);
+					}
+				}
+			}
+		} else if (eq_class1) {
+			// Only first read maps
+			if ((int)seq1->seq.l >= k) {
+				char* read_1kmer = malloc((k + 1) * sizeof(char));
+				if (read_1kmer) {
+					strncpy(read_1kmer, seq1->seq.s, k);
+					read_1kmer[k] = '\0';
+					
+					uint32_t h_row = kmer_hash(read_1kmer);
+					int h_col = 0;
+					
+					while (h_col < max_per_row && hashTable[h_row][h_col].kmer_seq[0]) {
+						if (strcmp(hashTable[h_row][h_col].kmer_seq, read_1kmer) == 0) {
+							hashTable[h_row][h_col].from_reads++;
+							break;
+						}
+						h_col++;
+					}
+					free(read_1kmer);
+				}
+			}
+		} else if (eq_class2) {
+			// Only second read maps
+			if ((int)seq2->seq.l >= k) {
+				char* read_1kmer = malloc((k + 1) * sizeof(char));
+				if (read_1kmer) {
+					strncpy(read_1kmer, seq2->seq.s, k);
+					read_1kmer[k] = '\0';
+					
+					uint32_t h_row = kmer_hash(read_1kmer);
+					int h_col = 0;
+					
+					while (h_col < max_per_row && hashTable[h_row][h_col].kmer_seq[0]) {
+						if (strcmp(hashTable[h_row][h_col].kmer_seq, read_1kmer) == 0) {
+							hashTable[h_row][h_col].from_reads++;
+							break;
+						}
+						h_col++;
+					}
+					free(read_1kmer);
+				}
+			}
+		}
+		// If neither read maps, skip this pair
+	}
+	
+	kseq_destroy(seq1);
+	kseq_destroy(seq2);
+	gzclose(fp1);
+	gzclose(fp2);
+	
+	printf("Done storing paired-end read counts (processed %d pairs)! \n\n", reads_processed);
+}
+
 // returns the list of T-labels associated with the k-mer sequence from the hash table, including -1s
 int * get_equiv_class(char* kmer)
 {
@@ -754,7 +998,32 @@ static void worker_update_trans_probs(void *data, long idx, int tid) {
 
 // This is our implementation of the EM algorithm
 void EM(int *lengths, double eps){
+	if (bootstrap_samples > 0) {
+		bootstrap_EM(lengths, eps);
+	} else {
+		// Regular EM without bootstrap
+		double *probs = calloc(num_t + 1, sizeof(double));
+		if (!probs) {
+			fprintf(stderr, "Error: Failed to allocate memory for EM algorithm\n");
+			exit(1);
+		}
+		
+		run_EM_iteration(lengths, eps, probs);
+		
+		// Write abundances to output file
+		if (g_output_file) {
+			write_abundances(g_output_file, probs);
+		}
+		
+		// This is the output of the EM (for validation if real.txt exists)
+		compare(probs);
+		
+		free(probs);
+	}
+}
 
+// Run a single EM iteration (used for both regular and bootstrap)
+void run_EM_iteration(int *lengths, double eps, double *probs_out) {
 	// Because the first cell is null in the eqc_arr
 	double *probs = calloc(num_t + 1, sizeof(double));
 	double *alpha = calloc(num_t + 1,  sizeof(double));
@@ -776,7 +1045,6 @@ void EM(int *lengths, double eps){
 	}
 
 	// Initialize the probs
-	printf("The value of num_t is %d\n", num_t + 1);
 	for(int i = 0; i <= num_t; i++){
 		probs[i] = 1./(num_t + 1);
 		alpha[i] = 0;
@@ -790,27 +1058,102 @@ void EM(int *lengths, double eps){
 		llk = likelihood(alpha, lengths);
 		diff = fabs(llk - prev_llk);
 		iterations++;
-		if (iterations % 10 == 0) {
+		if (iterations % 10 == 0 && bootstrap_samples == 0) {
 			fprintf(stderr, "Iteration %d: llk = %f, diff = %e\n", iterations, llk, diff);
 		}
 	} while(diff > eps);
 	
-	printf("\nEM converged after %d iterations\n", iterations);
-	printf("Final log-likelihood: %f\n", llk);
+	if (bootstrap_samples == 0) {
+		printf("\nEM converged after %d iterations\n", iterations);
+		printf("Final log-likelihood: %f\n", llk);
+	}
+	
+	// Copy results to output
+	for(int i = 0; i <= num_t; i++){
+		probs_out[i] = probs[i];
+	}
+	
+	// Free temporary memory
+	for(int i = 0; i < num_eqc_found; i++){
+		free(transcirpt_prob[i]);
+	}
+	free(transcirpt_prob);
+	free(probs);
+	free(alpha);
+}
 
-	// Write abundances to output file
+// Bootstrap EM algorithm
+void bootstrap_EM(int *lengths, double eps) {
+	printf("Running bootstrap with %d samples...\n", bootstrap_samples);
+	
+	// Allocate memory for bootstrap results
+	double **bootstrap_results = alloc_matrix(bootstrap_samples, num_t + 1);
+	if (!bootstrap_results) {
+		fprintf(stderr, "Error: Failed to allocate memory for bootstrap results\n");
+		exit(1);
+	}
+	
+	// Save original counts
+	int *original_counts = malloc(num_eqc_found * sizeof(int));
+	if (!original_counts) {
+		fprintf(stderr, "Error: Failed to allocate memory for original counts\n");
+		exit(1);
+	}
+	for(int i = 0; i < num_eqc_found; i++){
+		original_counts[i] = eqc_arr[i].count;
+	}
+	
+	// Run original EM first
+	double *original_probs = calloc(num_t + 1, sizeof(double));
+	if (!original_probs) {
+		fprintf(stderr, "Error: Failed to allocate memory for original probs\n");
+		free(original_counts);
+		exit(1);
+	}
+	
+	printf("Running original EM...\n");
+	run_EM_iteration(lengths, eps, original_probs);
+	printf("EM converged\n");
+	
+	// Run bootstrap iterations
+	for(int bs = 0; bs < bootstrap_samples; bs++) {
+		if ((bs + 1) % 10 == 0 || bs == 0) {
+			printf("Bootstrap iteration %d/%d\n", bs + 1, bootstrap_samples);
+		}
+		
+		// Resample equivalence classes with replacement
+		for(int i = 1; i < num_eqc_found; i++){
+			// Simple resampling: randomly select from original equivalence classes
+			int random_idx = 1 + (rand() % (num_eqc_found - 1));
+			eqc_arr[i].count = original_counts[random_idx];
+		}
+		
+		// Run EM on resampled data
+		run_EM_iteration(lengths, eps, bootstrap_results[bs]);
+	}
+	
+	// Restore original counts
+	for(int i = 0; i < num_eqc_found; i++){
+		eqc_arr[i].count = original_counts[i];
+	}
+	
+	printf("Bootstrap complete. Computing statistics...\n");
+	
+	// Write results with bootstrap statistics
 	if (g_output_file) {
-		write_abundances(g_output_file, probs);
+		write_abundances_with_bootstrap(g_output_file, original_probs, bootstrap_results, bootstrap_samples);
 	}
 	
 	// This is the output of the EM (for validation if real.txt exists)
-	compare(probs);
-	/*
-	for(int i = 0; i <= num_t; i++){
-		printf("%s \t rho %lf\n", t_names[i], probs[i]);
+	compare(original_probs);
+	
+	// Free memory
+	free(original_probs);
+	free(original_counts);
+	for(int i = 0; i < bootstrap_samples; i++){
+		free(bootstrap_results[i]);
 	}
-	*/
-	//printf("\n");
+	free(bootstrap_results);
 }
 
 // This methods update the alphas for each of the transcripts
@@ -1017,6 +1360,59 @@ void write_abundances(const char *output_file, double *probs) {
 	
 	fclose(out);
 	printf("Abundances written to %s\n", output_file);
+}
+
+// Write transcript abundances with bootstrap statistics to output file in TSV format
+void write_abundances_with_bootstrap(const char *output_file, double *probs, double **bootstrap_results, int n_bootstrap) {
+	FILE *out = fopen(output_file, "w");
+	if (!out) {
+		fprintf(stderr, "Error: Could not open output file '%s'\n", output_file);
+		return;
+	}
+	
+	// Write header with bootstrap columns
+	fprintf(out, "target_id\tlength\teff_length\test_counts\ttpm\tbs_mean_tpm\tbs_std_tpm\n");
+	
+	// Calculate total TPM for original
+	double total_tpm = 0;
+	for (int i = 1; i <= num_t; i++) {
+		total_tpm += probs[i];
+	}
+	
+	// Write each transcript with bootstrap statistics
+	for (int i = 1; i <= num_t; i++) {
+		double tpm = (total_tpm > 0) ? (probs[i] / total_tpm) * 1000000.0 : 0;
+		double est_counts = probs[i] * t_lengths[i - 1];
+		
+		// Calculate bootstrap mean and std dev for this transcript
+		double bs_sum = 0;
+		double bs_sum_sq = 0;
+		for (int bs = 0; bs < n_bootstrap; bs++) {
+			// Calculate TPM for this bootstrap sample
+			double bs_total_tpm = 0;
+			for (int j = 1; j <= num_t; j++) {
+				bs_total_tpm += bootstrap_results[bs][j];
+			}
+			double bs_tpm = (bs_total_tpm > 0) ? (bootstrap_results[bs][i] / bs_total_tpm) * 1000000.0 : 0;
+			bs_sum += bs_tpm;
+			bs_sum_sq += bs_tpm * bs_tpm;
+		}
+		double bs_mean = bs_sum / n_bootstrap;
+		double bs_variance = (bs_sum_sq / n_bootstrap) - (bs_mean * bs_mean);
+		double bs_std = sqrt(bs_variance > 0 ? bs_variance : 0);
+		
+		fprintf(out, "%s\t%d\t%d\t%.2f\t%.4f\t%.4f\t%.4f\n", 
+			t_names[i - 1],  // t_names is 0-indexed
+			t_lengths[i - 1],
+			t_lengths[i - 1],  // effective length (simplified, same as length)
+			est_counts,
+			tpm,
+			bs_mean,
+			bs_std);
+	}
+	
+	fclose(out);
+	printf("Abundances with bootstrap statistics written to %s\n", output_file);
 }
 
 
