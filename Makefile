@@ -2,11 +2,11 @@
 
 CC = gcc
 CFLAGS = -Wall -Wextra -O2 -std=c99
-LDFLAGS = -lm -lz
+LDFLAGS = -lm -lz -lpthread
 
 TARGET = kallisto
 BINARY_CONVERT = binary_convert
-SOURCES = kallisto.c
+SOURCES = kallisto.c kthread.c
 CONVERT_SOURCES = Binary_convert.c
 OBJECTS = $(SOURCES:.c=.o)
 CONVERT_OBJECTS = $(CONVERT_SOURCES:.c=.o)
