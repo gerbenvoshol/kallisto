@@ -1,5 +1,6 @@
 /*
- *[KSD] compile with -DKSD to get corrected code.
+ * Kallisto C Implementation
+ * A reimplementation of kallisto RNA-seq quantification tool in C
  */
 
 #include <stdio.h>
@@ -9,6 +10,9 @@
 #include <math.h>
 #include <float.h>
 #include <stdint.h>
+#include <getopt.h>
+
+#define VERSION "0.1.0"
 
 typedef struct{
 	char * kmer_seq; // the kmer sequence
@@ -22,6 +26,7 @@ typedef struct{
 	int * eq_class_labels; // list of labels of transcripts that contain the k-mer
 } eq_c_count;
 
+// Function prototypes
 uint32_t kmer_hash(char * kmer_seq);
 uint32_t eq_hash(char * eq_class);
 void store_name_idx(char * name, int t_name_idx);
@@ -36,7 +41,9 @@ void print_eqc_arr();
 void print_t_lengths();
 void free_hashTable();
 void compare(double *probs);
-
+void print_usage(const char *prog_name);
+void print_version();
+void write_abundances(const char *output_file, double *probs);
 
 //EM related
 void EM(int *lengths, double eps);
@@ -47,39 +54,139 @@ void update_trans_probs(double *probs, double **transcirpt_prob);
 double **alloc_matrix(int n, int r);
 double likelihood(double *alpha, int *lengths);
 
+// Global variables
 kmer_labeled **hashTable;
 eq_c_count *eqc_arr;
-int tr_name_chars = 13;
+int tr_name_chars = 100;  // Increased for longer names
 int max_hasht_rows = 1000;
 int max_per_row = 10;
-int k = 50;
+int k = 31;  // Default k-mer size (kallisto default)
 int num_t = 125;
 int num_eq_classes;
-int max_line_length = 7000;
+int max_line_length = 10000;  // Increased for longer sequences
 int num_eqc_found;
 
 char ** t_names;
 int * t_lengths;
+char * g_output_file = NULL;  // Global output file path
 
+void print_usage(const char *prog_name) {
+	fprintf(stderr, "kallisto C implementation v%s\n\n", VERSION);
+	fprintf(stderr, "Usage: %s [options] -i <index> -o <output>\n\n", prog_name);
+	fprintf(stderr, "Required arguments:\n");
+	fprintf(stderr, "  -i, --index <file>        Transcriptome index/reference file (FASTA format)\n");
+	fprintf(stderr, "  -r, --reads <file>        Input reads file (FASTA format)\n");
+	fprintf(stderr, "  -o, --output <file>       Output file for abundance estimates\n\n");
+	fprintf(stderr, "Optional arguments:\n");
+	fprintf(stderr, "  -k, --kmer-size <int>     K-mer size (default: 31)\n");
+	fprintf(stderr, "  -e, --epsilon <float>     EM convergence threshold (default: 0.01)\n");
+	fprintf(stderr, "  -m, --max-reads <int>     Maximum number of reads to process (default: all)\n");
+	fprintf(stderr, "  -h, --help                Display this help message\n");
+	fprintf(stderr, "  -v, --version             Display version information\n\n");
+}
 
-int main()
+void print_version() {
+	printf("kallisto C implementation version %s\n", VERSION);
+}
+
+int main(int argc, char *argv[])
 {
+	char *index_file = NULL;
+	char *reads_file = NULL;
+	char *output_file = NULL;
+	int max_reads = INT_MAX;
+	double epsilon = 0.01;
+	
+	static struct option long_options[] = {
+		{"index",      required_argument, 0, 'i'},
+		{"reads",      required_argument, 0, 'r'},
+		{"output",     required_argument, 0, 'o'},
+		{"kmer-size",  required_argument, 0, 'k'},
+		{"epsilon",    required_argument, 0, 'e'},
+		{"max-reads",  required_argument, 0, 'm'},
+		{"help",       no_argument,       0, 'h'},
+		{"version",    no_argument,       0, 'v'},
+		{0, 0, 0, 0}
+	};
+	
+	int opt;
+	int option_index = 0;
+	
+	while ((opt = getopt_long(argc, argv, "i:r:o:k:e:m:hv", long_options, &option_index)) != -1) {
+		switch (opt) {
+			case 'i':
+				index_file = optarg;
+				break;
+			case 'r':
+				reads_file = optarg;
+				break;
+			case 'o':
+				output_file = optarg;
+				break;
+			case 'k':
+				k = atoi(optarg);
+				if (k <= 0 || k > 100) {
+					fprintf(stderr, "Error: k-mer size must be between 1 and 100\n");
+					return 1;
+				}
+				break;
+			case 'e':
+				epsilon = atof(optarg);
+				if (epsilon <= 0) {
+					fprintf(stderr, "Error: epsilon must be positive\n");
+					return 1;
+				}
+				break;
+			case 'm':
+				max_reads = atoi(optarg);
+				if (max_reads <= 0) {
+					fprintf(stderr, "Error: max-reads must be positive\n");
+					return 1;
+				}
+				break;
+			case 'h':
+				print_usage(argv[0]);
+				return 0;
+			case 'v':
+				print_version();
+				return 0;
+			default:
+				print_usage(argv[0]);
+				return 1;
+		}
+	}
+	
+	// Check required arguments
+	if (!index_file || !reads_file || !output_file) {
+		fprintf(stderr, "Error: Missing required arguments\n\n");
+		print_usage(argv[0]);
+		return 1;
+	}
+	
+	// Set global output file
+	g_output_file = output_file;
+	
+	printf("Kallisto C implementation v%s\n", VERSION);
+	printf("Index file:  %s\n", index_file);
+	printf("Reads file:  %s\n", reads_file);
+	printf("Output file: %s\n", output_file);
+	printf("K-mer size:  %d\n", k);
+	printf("Epsilon:     %f\n", epsilon);
+	printf("\n");
 
-	char * tscripts_file = "transcriptome_gffread.bin";
-	create_htable(tscripts_file);
+	create_htable(index_file);
 
-	char * reads_file = "./simdata/cov_100_readlen_150_paired_FALSE/sample_02.fasta";
-	store_read_counts(reads_file, INT_MAX);
+	store_read_counts(reads_file, max_reads);
 	store_eqiv_classes();
 
 	// Freeing the hash table because is not needed for the EM
 	free_hashTable();
 
-	printf("Eqivalence classes: \n");
+	printf("Equivalence classes: \n");
 	print_eqc_arr();
 
-	EM(t_lengths, 0.01);
-
+	printf("\nRunning EM algorithm...\n");
+	EM(t_lengths, epsilon);
 
 	return 0;
 }
@@ -101,12 +208,33 @@ uint32_t kmer_hash(char * kmer_seq)
 // variable used to know the amout of kmers in the transcript
 char** get_kmers(char* seq, int k, int *size)
 {
-	int num_kmers = strlen(seq) - k;
+	int seq_len = strlen(seq);
+	if (seq_len <= k) {
+		*size = 0;
+		return NULL;
+	}
+	int num_kmers = seq_len - k + 1;  // Fixed: should be +1, not just -k
 	char ** kmers = malloc(num_kmers * sizeof(char*));
+	if (!kmers) {
+		fprintf(stderr, "Failed to allocate memory for kmers\n");
+		*size = 0;
+		return NULL;
+	}
 
 	for (int i = 0; i < num_kmers; i++){
-		kmers[i] = malloc(k * sizeof(char));
+		kmers[i] = malloc((k + 1) * sizeof(char));  // +1 for null terminator
+		if (!kmers[i]) {
+			fprintf(stderr, "Failed to allocate memory for kmer\n");
+			// Free previously allocated memory
+			for (int j = 0; j < i; j++) {
+				free(kmers[j]);
+			}
+			free(kmers);
+			*size = 0;
+			return NULL;
+		}
 		strncpy(kmers[i], seq + i, k);
+		kmers[i][k] = '\0';  // Null terminate
 		*size += 1;
 	}
 
@@ -120,6 +248,11 @@ int fileSize(char *file){
 	FILE *fptr;
 	char ch;
 	fptr=fopen(file,"rb");
+	
+	if (!fptr) {
+		fprintf(stderr, "Error: Could not open file '%s'\n", file);
+		return -1;
+	}
 
 	int count = 0;
 	num_t = 0;
@@ -129,13 +262,18 @@ int fileSize(char *file){
 			num_t++;
 		}
 	}
-	/* [KSD, BUG] This will fail if there is no newline on the last line. */
-	num_t /= 2; // there are two newlines, 1 for the sequence and one for the name, for every transcript in the file
+	
+	// Handle case where last line doesn't have newline
+	if (count > 0 && ch != '\n') {
+		num_t++;
+	}
+	
+	num_t /= 2; // there are two lines (name and sequence) for every transcript in the file
 	printf("number of transcripts = %d\n", num_t);
 	fclose(fptr);
 
-	return count;	/* [KSD] This is the number of characters in fasta file,
-			 * [KSD] which is a VERY ROUGH way to bound the hash size.
+	return count;	/* This is the number of characters in fasta file,
+			 * which is a VERY ROUGH way to bound the hash size.
 			 */
 }
 
@@ -150,19 +288,42 @@ void store_name_at_idx(char * name, int t_name_id){
 void create_htable(char * tscripts_file)
 //void create_htable()
 {
-	max_hasht_rows = fileSize(tscripts_file) * 0.5;	/* [KSD] rough */
+	int file_size = fileSize(tscripts_file);
+	if (file_size < 0) {
+		fprintf(stderr, "Error: Failed to read file size\n");
+		exit(1);
+	}
+	max_hasht_rows = file_size * 0.5;	/* rough */
 	t_names = calloc(num_t, sizeof(char*));
 	t_lengths = calloc(num_t, sizeof(int));
+	
+	if (!t_names || !t_lengths) {
+		fprintf(stderr, "Error: Failed to allocate memory for transcript names/lengths\n");
+		exit(1);
+	}
 
 	printf("Initializing hash table \n");
 
 	hashTable = calloc(max_hasht_rows, sizeof(kmer_labeled*));
+	if (!hashTable) {
+		fprintf(stderr, "Error: Failed to allocate memory for hash table\n");
+		exit(1);
+	}
+	
 	for(int i = 0; i < max_hasht_rows; i++){
 		hashTable[i] = calloc(max_per_row, sizeof(kmer_labeled));
+		if (!hashTable[i]) {
+			fprintf(stderr, "Error: Failed to allocate memory for hash table row %d\n", i);
+			exit(1);
+		}
 		for(int j = 0; j < max_per_row; j++){
-			hashTable[i][j].kmer_seq = calloc(k, sizeof(char));
+			hashTable[i][j].kmer_seq = calloc(k + 1, sizeof(char));  // +1 for null terminator
 			hashTable[i][j].from_reads = 0;
 			hashTable[i][j].t_labels = calloc(num_t, sizeof(int)); //every transcript could contain this seq
+			if (!hashTable[i][j].kmer_seq || !hashTable[i][j].t_labels) {
+				fprintf(stderr, "Error: Failed to allocate memory for hash table entry\n");
+				exit(1);
+			}
 			for(int m = 0; m < num_t; m++){
 				hashTable[i][j].t_labels[m] = -1; // -1 means null, there is no label
 			}
@@ -171,17 +332,32 @@ void create_htable(char * tscripts_file)
 	printf("Hash table initialized\n");
 
 	FILE * tscripts_filep = fopen(tscripts_file, "rb");
+	if (!tscripts_filep) {
+		fprintf(stderr, "Error: Could not open transcripts file '%s'\n", tscripts_file);
+		exit(1);
+	}
+	
 	int t_name_id = 0;
 	while(!feof(tscripts_filep)){
 
-		char *name	 = malloc(tr_name_chars * sizeof(char));
+		char *name	 = malloc(max_line_length * sizeof(char));
 		char *seq	 = malloc(max_line_length * sizeof(char));
+		
+		if (!name || !seq) {
+			fprintf(stderr, "Error: Failed to allocate memory for reading transcript\n");
+			exit(1);
+		}
 
-		fgets(name, max_line_length, tscripts_filep);
-		fgets(seq, max_line_length, tscripts_filep);
+		if (!fgets(name, max_line_length, tscripts_filep)) break;
+		if (!fgets(seq, max_line_length, tscripts_filep)) {
+			free(name);
+			free(seq);
+			break;
+		}
 
 		// cleaning the name for the hash function
 		name = clean(name);
+		seq = clean(seq);  // Also clean sequence to remove newline
 
 		store_name_at_idx(name, t_name_id);
 		int l_t = strlen(seq); // needed for EM algo
@@ -189,10 +365,15 @@ void create_htable(char * tscripts_file)
 
 		int size = 0;
 		char** kmers = get_kmers(seq, k, &size);
+		
+		if (!kmers) {
+			free(name);
+			free(seq);
+			continue;
+		}
 
 		for (int i = 0; i < size; i++){
-			char * kmer = malloc(k * sizeof(char));
-			strncpy(kmer, kmers[i], k); // just to make code more readable
+			char * kmer = kmers[i];  // No need to malloc and copy, use directly
 			uint32_t h_row = kmer_hash(kmer);
 			int h_col = 0;
 
@@ -201,7 +382,8 @@ void create_htable(char * tscripts_file)
 				h_col++;
 
 				if (h_col >= max_per_row){
-					fprintf(stderr, "Not enough columns in hash table: increase max_per_row. \n");
+					fprintf(stderr, "Error: Not enough columns in hash table at row %d: increase max_per_row\n", h_row);
+					exit(1);
 				}
 			}
 
@@ -212,25 +394,35 @@ void create_htable(char * tscripts_file)
 			while ((hashTable[h_row][h_col].t_labels[lab_idx] != t_name_id) && (hashTable[h_row][h_col].t_labels[lab_idx] != -1 )){
 				lab_idx++;
 				if (lab_idx >= num_t){ // should never happen
-					fprintf(stderr, "More than max number of transcripts have sequence in common. \n");
+					fprintf(stderr, "Error: More than max number of transcripts have sequence in common\n");
 					lab_idx--;
 					break;
 				}
 			}
 			hashTable[h_row][h_col].t_labels[lab_idx] = t_name_id; // extra step if already found, rewrites same int
-			//free(kmer);
 		}
+		
+		// Free kmers array
+		for (int i = 0; i < size; i++) {
+			free(kmers[i]);
+		}
+		free(kmers);
+		free(name);
+		free(seq);
 		t_name_id++;
-		//free(name);
-		//free(seq);
-		//free(kmers);
 	}
+	fclose(tscripts_filep);
 	printf("Done reading transcripts and storing kmers in hash table!\n\n");
 }
 
 void store_read_counts(char * reads_file, int max_reads)
 {
 	FILE* reads_filep = fopen(reads_file, "rb");
+	
+	if (!reads_filep) {
+		fprintf(stderr, "Error: Could not open reads file '%s'\n", reads_file);
+		exit(1);
+	}
 
 	printf("Reading reads \n");
 
@@ -240,30 +432,55 @@ void store_read_counts(char * reads_file, int max_reads)
 
 		char *name	 = malloc(max_line_length * sizeof(char));
 		char *seq	 = malloc(max_line_length * sizeof(char));
+		
+		if (!name || !seq) {
+			fprintf(stderr, "Error: Failed to allocate memory for reading reads\n");
+			exit(1);
+		}
 
-		fgets(name, max_line_length, reads_filep);
-		fgets(seq, max_line_length, reads_filep);
+		if (!fgets(name, max_line_length, reads_filep)) {
+			free(name);
+			free(seq);
+			break;
+		}
+		if (!fgets(seq, max_line_length, reads_filep)) {
+			free(name);
+			free(seq);
+			break;
+		}
 
 		// For the hash table
 		name = clean(name);
+		seq = clean(seq);
 
 		// We are using the 1st kmer of the sequence only to identify which transcript the fragment could have come from, as suggested.
 		// This is less accurate than the de brujin graph technique kallisto uses, but a necessary shortcut to finish this project in time.
-		char* read_1kmer = malloc(k * sizeof(char));
+		char* read_1kmer = malloc((k + 1) * sizeof(char));
+		if (!read_1kmer) {
+			fprintf(stderr, "Error: Failed to allocate memory for kmer\n");
+			free(name);
+			free(seq);
+			continue;
+		}
 		strncpy(read_1kmer, seq, k);
+		read_1kmer[k] = '\0';
 
 		// find read_1kmer in hashTable and increment the from_reads count of it
 		uint32_t h_row = kmer_hash(read_1kmer);
 
 		int h_col = 0;
 		int k_start = 1;
+		int seq_len = strlen(seq);
 		while (strcmp(hashTable[h_row][h_col].kmer_seq, read_1kmer) != 0) {
 			if (!(hashTable[h_row][h_col].kmer_seq[0])){
-				char* next_kmer = malloc(k * sizeof(char));	/* [KSD] Why allocate memory instead of directly copying to read_1kmer? */
-				strncpy(next_kmer, seq + k_start, k);
+				// Try next kmer in the sequence
+				if (k_start + k > seq_len) {
+					// No more kmers to try
+					break;
+				}
+				strncpy(read_1kmer, seq + k_start, k);
+				read_1kmer[k] = '\0';
 				k_start++;
-				strcpy(read_1kmer, next_kmer); //begin cycle again with different read_1kmer
-				free(next_kmer);
 				h_row = kmer_hash(read_1kmer);
 				h_col = -1;
 			}
@@ -273,11 +490,12 @@ void store_read_counts(char * reads_file, int max_reads)
 		if (hashTable[h_row][h_col].kmer_seq[0]){
 			hashTable[h_row][h_col].from_reads++; // only increment if sequence was found in table
 		}
-		//free(name);
-		//free(seq);
-		//free(read_1kmer);
-		//printf("hashTable[%d][%d].from_reads = %d\n", h_row, h_col, hashTable[h_row][h_col].from_reads);
+		
+		free(name);
+		free(seq);
+		free(read_1kmer);
 	}
+	fclose(reads_filep);
 	printf("Done storing read counts! \n\n");
 }
 
@@ -294,7 +512,11 @@ int * get_equiv_class(char* kmer)
 		}
 	}
 	// allocate memory to copy transcript ids in eqivalency class from hash table
-	int * eq_class = malloc(sizeof(int*));
+	int * eq_class = malloc(num_t * sizeof(int));  // Fixed: was sizeof(int*), should be num_t * sizeof(int)
+	if (!eq_class) {
+		fprintf(stderr, "Failed to allocate memory for equivalence class\n");
+		return NULL;
+	}
 	for (int lab_idx = 0; lab_idx < num_t; lab_idx++){
 		eq_class[lab_idx] = hashTable[h_row][h_col].t_labels[lab_idx];
 	}
@@ -329,14 +551,24 @@ void store_eqiv_classes()
 	printf("num_eq_classes = %d\n", num_eq_classes);
 
 	if (num_eq_classes < 0){
-		fprintf(stderr, "Too many transcrpts, 2^num_t = %d\n", num_eq_classes);
+		fprintf(stderr, "Error: Too many transcripts, 2^num_t = %d\n", num_eq_classes);
+		exit(1);
 	}
 
 	eqc_arr = calloc(num_eq_classes, sizeof(eq_c_count));
+	if (!eqc_arr) {
+		fprintf(stderr, "Error: Failed to allocate memory for equivalence class array\n");
+		exit(1);
+	}
+	
 	for(int i = 0; i < num_eq_classes; i++){
 		eqc_arr[i].count = 0;
 		eqc_arr[i].eq_class_id = -1;
 		eqc_arr[i].eq_class_labels = calloc(num_t, sizeof(int));
+		if (!eqc_arr[i].eq_class_labels) {
+			fprintf(stderr, "Error: Failed to allocate memory for equivalence class labels\n");
+			exit(1);
+		}
 		for(int j = 0; j < num_t; j++){
 			eqc_arr[i].eq_class_labels[j] = -1; // important for comparing equivalency classes
 		}
@@ -396,7 +628,7 @@ void print_hashTable(){
 
 // Here we are printing the vector of lengths
 void print_t_lengths(){
-	for (int i = 0; i <= num_t; i++){
+	for (int i = 0; i < num_t; i++){  // Fixed: was <=, should be <
 		printf("t_lengths[%d] = %d\n", i, t_lengths[i]);
 	}
 }
@@ -458,9 +690,12 @@ uint32_t murmurhash (const char *key, uint32_t len, uint32_t seed) {
 
 	// remainder
 	switch (len & 3) { // `len % 4'
-		case 3: k ^= (tail[2] << 16);
-		case 2: k ^= (tail[1] << 8);
-
+		case 3: 
+			k ^= (tail[2] << 16);
+			/* fall through */
+		case 2: 
+			k ^= (tail[1] << 8);
+			/* fall through */
 		case 1:
 			k ^= tail[0];
 			k *= c1;
@@ -487,30 +722,52 @@ void EM(int *lengths, double eps){
 	// Because the first cell is null in the eqc_arr
 	double *probs = calloc(num_t + 1, sizeof(double));
 	double *alpha = calloc(num_t + 1,  sizeof(double));
+	
+	if (!probs || !alpha) {
+		fprintf(stderr, "Error: Failed to allocate memory for EM algorithm\n");
+		exit(1);
+	}
 
 	double llk = 0;
 	double prev_llk = 0;
 	double **transcirpt_prob = alloc_matrix(num_eqc_found, num_t + 1);
-
-	/* [KSD] Check for failure! */
+	
+	if (!transcirpt_prob) {
+		fprintf(stderr, "Error: Failed to allocate memory for transcript probabilities\n");
+		free(probs);
+		free(alpha);
+		exit(1);
+	}
 
 	// Initialize the probs
-	printf("The vaule of num_t is %d\n", num_t + 1);
+	printf("The value of num_t is %d\n", num_t + 1);
 	for(int i = 0; i <= num_t; i++){
 		probs[i] = 1./(num_t + 1);
 		alpha[i] = 0;
 	}
 
 	double diff;
+	int iterations = 0;
 	do {
 		prev_llk = llk;
 		update_parameters(alpha, probs, lengths, transcirpt_prob);
 		llk = likelihood(alpha, lengths);
 		diff = fabs(llk - prev_llk);
-fprintf(stderr, "%f %f: %f (%e)\n", alpha[0]/lengths[0], alpha[1]/lengths[1], llk, diff);
+		iterations++;
+		if (iterations % 10 == 0) {
+			fprintf(stderr, "Iteration %d: llk = %f, diff = %e\n", iterations, llk, diff);
+		}
 	} while(diff > eps);
+	
+	printf("\nEM converged after %d iterations\n", iterations);
+	printf("Final log-likelihood: %f\n", llk);
 
-	// This is the output of the EM
+	// Write abundances to output file
+	if (g_output_file) {
+		write_abundances(g_output_file, probs);
+	}
+	
+	// This is the output of the EM (for validation if real.txt exists)
 	compare(probs);
 	/*
 	for(int i = 0; i <= num_t; i++){
@@ -527,11 +784,8 @@ void update_alphas(double *alpha, double **transcirpt_prob){
 		double sum = 0;
 
 		for(int i = 1; i < num_eqc_found; i++){
-#ifdef KSD	/* [KSD] correction */
+			// KSD correction: multiply by count
 			sum += eqc_arr[i].count * transcirpt_prob[i][k];
-#else
-			sum += transcirpt_prob[i][k];
-#endif
 		}
 
 		alpha[k] = sum/num_eqc_found;
@@ -607,9 +861,24 @@ void update_parameters(double *alpha, double *probs, int *lengths, double **tran
 // This method allocate a 2D array of size n and r in the memory
 double **alloc_matrix(int r, int c){
 	double **mat = calloc(r, sizeof(double*));
+	
+	if (!mat) {
+		fprintf(stderr, "Error: Failed to allocate memory for matrix\n");
+		return NULL;
+	}
 
-	for(int i = 0; i < r; i++)
+	for(int i = 0; i < r; i++) {
 		mat[i] = calloc(c, sizeof(double));
+		if (!mat[i]) {
+			fprintf(stderr, "Error: Failed to allocate memory for matrix row %d\n", i);
+			// Free previously allocated rows
+			for (int j = 0; j < i; j++) {
+				free(mat[j]);
+			}
+			free(mat);
+			return NULL;
+		}
+	}
 
 	return mat;
 }
@@ -629,15 +898,28 @@ void free_hashTable(){
 // This method calculate the mean squared error
 void compare(double *probs){
 
-
 	FILE * tscripts_filep = fopen("real.txt", "r");
+	if (!tscripts_filep) {
+		fprintf(stderr, "Warning: Could not open real.txt for comparison\n");
+		return;
+	}
+	
 	char n[15];
 	int d1;
 	int *d = malloc(num_t * sizeof(int));
+	if (!d) {
+		fprintf(stderr, "Error: Failed to allocate memory for comparison\n");
+		fclose(tscripts_filep);
+		return;
+	}
+	
 	int tot = 0;
 
 	for(int i = 0; i < num_t; i++){
-		fscanf(tscripts_filep, "%s %d %d", n, &d1, &d[i]);
+		if (fscanf(tscripts_filep, "%s %d %d", n, &d1, &d[i]) != 3) {
+			fprintf(stderr, "Warning: Error reading real.txt at line %d\n", i);
+			break;
+		}
 		tot += d[i];
 	}
 
@@ -647,13 +929,47 @@ void compare(double *probs){
 	for(int i = 0; i < num_t; i++){
 		double p = (double) d[i] / tot;
 		error += pow((p - probs[i + 1]), 2);
-		printf("%s \t %lf \t %lf\n", t_names[i + 1], p, probs[i + 1]);
+		printf("%s \t %lf \t %lf\n", t_names[i], p, probs[i + 1]);  // Fixed: t_names is 0-indexed
 	}
 
 	printf("The MSE is %lf\n", (error/num_t));
 
-
+	free(d);
 	fclose(tscripts_filep);
-
 }
+
+// Write transcript abundances to output file in TSV format
+void write_abundances(const char *output_file, double *probs) {
+	FILE *out = fopen(output_file, "w");
+	if (!out) {
+		fprintf(stderr, "Error: Could not open output file '%s'\n", output_file);
+		return;
+	}
+	
+	// Write header
+	fprintf(out, "target_id\tlength\teff_length\test_counts\ttpm\n");
+	
+	// Calculate total TPM
+	double total_tpm = 0;
+	for (int i = 1; i <= num_t; i++) {
+		total_tpm += probs[i];
+	}
+	
+	// Write each transcript
+	for (int i = 1; i <= num_t; i++) {
+		double tpm = (total_tpm > 0) ? (probs[i] / total_tpm) * 1000000.0 : 0;
+		double est_counts = probs[i] * t_lengths[i - 1];
+		
+		fprintf(out, "%s\t%d\t%d\t%.2f\t%.4f\n", 
+			t_names[i - 1],  // Fixed: t_names is 0-indexed
+			t_lengths[i - 1],
+			t_lengths[i - 1],  // effective length (simplified, same as length)
+			est_counts,
+			tpm);
+	}
+	
+	fclose(out);
+	printf("Abundances written to %s\n", output_file);
+}
+
 
