@@ -42,6 +42,9 @@ You need two FASTA files:
 
 # With bootstrap for uncertainty estimation
 ./kallisto -i reference.fasta -r sample1.fasta -o sample1_abundance.tsv -b 100
+
+# With full de Bruijn graph for more accurate pseudoalignment
+./kallisto -i reference.fasta -r sample1.fasta -o sample1_abundance.tsv -d
 ```
 
 ### Example 2: Processing Multiple Samples
@@ -179,6 +182,19 @@ done
 - **Higher values (500-1000)**: More accurate uncertainty estimates but slower
 - Bootstrap provides statistical confidence in abundance estimates
 - Essential for differential expression analysis
+
+### Pseudoalignment Mode (`-d`)
+- **Default: First k-mer only** - Uses only the first matching k-mer from each read
+  - Faster and less memory intensive
+  - Good for most applications
+- **Full de Bruijn graph (`-d` flag)**: Examines all k-mers in each read
+  - More accurate pseudoalignment
+  - Computes intersection of all k-mer equivalence classes
+  - Matches the approach used by the original kallisto
+  - Recommended for:
+    - High-accuracy quantification requirements
+    - Complex transcriptomes with many isoforms
+    - When computational resources are available
 
 ### Read Mode Selection
 - **Single-end (`-r`)**: Use when you have single-end sequencing data

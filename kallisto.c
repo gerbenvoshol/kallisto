@@ -45,7 +45,6 @@ void store_read_counts(char * reads_file, int max_reads);
 void store_paired_read_counts(char * reads_file1, char * reads_file2, int max_reads);
 int * get_equiv_class(char* kmer);
 int * compute_eq_class_intersection(int **eq_classes, int num_classes);
-void increment_eq_class_count(int *eq_class);
 void store_eqiv_classes();
 uint32_t murmurhash (const char *key, uint32_t len, uint32_t seed);
 char *clean(char *str);
@@ -541,7 +540,10 @@ void store_read_counts(char * reads_file, int max_reads)
 			
 			// Collect all equivalence classes from matching k-mers
 			int **eq_classes = malloc(num_kmers * sizeof(int*));
-			if (!eq_classes) {
+			int *kmer_positions = malloc(num_kmers * sizeof(int));  // Track which k-mer position matched
+			if (!eq_classes || !kmer_positions) {
+				free(eq_classes);
+				free(kmer_positions);
 				continue;
 			}
 			
@@ -549,6 +551,7 @@ void store_read_counts(char * reads_file, int max_reads)
 			char* kmer_buf = malloc((k + 1) * sizeof(char));
 			if (!kmer_buf) {
 				free(eq_classes);
+				free(kmer_positions);
 				continue;
 			}
 			
@@ -566,13 +569,15 @@ void store_read_counts(char * reads_file, int max_reads)
 						break;
 					}
 					if (strcmp(hashTable[h_row][h_col].kmer_seq, kmer_buf) == 0) {
-						// Found k-mer, store its equivalence class
+						// Found k-mer, store its equivalence class and position
 						int *eq_class = malloc(num_t * sizeof(int));
 						if (eq_class) {
 							for (int t = 0; t < num_t; t++) {
 								eq_class[t] = hashTable[h_row][h_col].t_labels[t];
 							}
-							eq_classes[num_matched++] = eq_class;
+							eq_classes[num_matched] = eq_class;
+							kmer_positions[num_matched] = pos;
+							num_matched++;
 						}
 						break;
 					}
@@ -585,8 +590,31 @@ void store_read_counts(char * reads_file, int max_reads)
 			// Compute intersection of all equivalence classes
 			if (num_matched > 0) {
 				int *intersection = compute_eq_class_intersection(eq_classes, num_matched);
+				if (intersection && intersection[0] != -1) {
+					// Increment count for the first k-mer that was found
+					// (which now represents the intersection)
+					char* first_kmer = malloc((k + 1) * sizeof(char));
+					if (first_kmer) {
+						strncpy(first_kmer, seq->seq.s + kmer_positions[0], k);
+						first_kmer[k] = '\0';
+						
+						uint32_t h_row = kmer_hash(first_kmer);
+						int h_col = 0;
+						
+						while (h_col < max_per_row) {
+							if (!hashTable[h_row][h_col].kmer_seq[0]) {
+								break;
+							}
+							if (strcmp(hashTable[h_row][h_col].kmer_seq, first_kmer) == 0) {
+								hashTable[h_row][h_col].from_reads++;
+								break;
+							}
+							h_col++;
+						}
+						free(first_kmer);
+					}
+				}
 				if (intersection) {
-					increment_eq_class_count(intersection);
 					free(intersection);
 				}
 				
@@ -597,6 +625,7 @@ void store_read_counts(char * reads_file, int max_reads)
 			}
 			
 			free(eq_classes);
+			free(kmer_positions);
 			
 		} else {
 			// Original approach: use first matching k-mer only
@@ -964,37 +993,6 @@ int * compute_eq_class_intersection(int **eq_classes, int num_classes) {
 	}
 	
 	return intersection;
-}
-
-// Increment count for an equivalence class by finding matching k-mer in hash table
-void increment_eq_class_count(int *eq_class) {
-	if (!eq_class || eq_class[0] == -1) {
-		return;
-	}
-	
-	// Find a k-mer in the hash table that has this equivalence class
-	// We'll search through the hash table to find a matching entry
-	for (int i = 0; i < max_hasht_rows; i++) {
-		for (int j = 0; j < max_per_row; j++) {
-			if (!hashTable[i][j].kmer_seq[0]) {
-				continue;
-			}
-			
-			// Check if this k-mer's equivalence class matches
-			int matches = 1;
-			for (int t = 0; t < num_t; t++) {
-				if (hashTable[i][j].t_labels[t] != eq_class[t]) {
-					matches = 0;
-					break;
-				}
-			}
-			
-			if (matches) {
-				hashTable[i][j].from_reads++;
-				return;
-			}
-		}
-	}
 }
 
 
