@@ -612,6 +612,49 @@ int* find_kmer_eq_class(char* seq_str, int seq_len) {
 	return NULL;
 }
 
+// Helper function to increment count for first matching k-mer in sequence
+int increment_kmer_count(char* seq_str, int seq_len) {
+	if (seq_len < k) {
+		return 0;
+	}
+	
+	char* read_1kmer = malloc((k + 1) * sizeof(char));
+	if (!read_1kmer) {
+		return 0;
+	}
+	
+	int k_start = 0;
+	int found = 0;
+	
+	// Try multiple k-mers in the sequence
+	while (k_start + k <= seq_len) {
+		strncpy(read_1kmer, seq_str + k_start, k);
+		read_1kmer[k] = '\0';
+		
+		uint32_t h_row = kmer_hash(read_1kmer);
+		int h_col = 0;
+		
+		while (h_col < max_per_row) {
+			if (!hashTable[h_row][h_col].kmer_seq[0]) {
+				// Empty slot, k-mer not found in this position
+				break;
+			}
+			if (strcmp(hashTable[h_row][h_col].kmer_seq, read_1kmer) == 0) {
+				// Found the k-mer, increment count
+				hashTable[h_row][h_col].from_reads++;
+				found = 1;
+				free(read_1kmer);
+				return 1;
+			}
+			h_col++;
+		}
+		k_start++;
+	}
+	
+	free(read_1kmer);
+	return found;
+}
+
 // Store paired-end read counts
 void store_paired_read_counts(char * reads_file1, char * reads_file2, int max_reads)
 {
@@ -668,72 +711,16 @@ void store_paired_read_counts(char * reads_file1, char * reads_file2, int max_re
 				if (intersection_found) break;
 			}
 			
-			// If intersection exists, increment counts for transcripts in both
+			// If intersection exists, increment counts for the first read's k-mer
 			if (intersection_found) {
-				// For simplicity, we'll use the first read's k-mer that has intersection
-				// This is a simplified approach
-				if ((int)seq1->seq.l >= k) {
-					char* read_1kmer = malloc((k + 1) * sizeof(char));
-					if (read_1kmer) {
-						strncpy(read_1kmer, seq1->seq.s, k);
-						read_1kmer[k] = '\0';
-						
-						uint32_t h_row = kmer_hash(read_1kmer);
-						int h_col = 0;
-						
-						while (h_col < max_per_row && hashTable[h_row][h_col].kmer_seq[0]) {
-							if (strcmp(hashTable[h_row][h_col].kmer_seq, read_1kmer) == 0) {
-								hashTable[h_row][h_col].from_reads++;
-								break;
-							}
-							h_col++;
-						}
-						free(read_1kmer);
-					}
-				}
+				increment_kmer_count(seq1->seq.s, seq1->seq.l);
 			}
 		} else if (eq_class1) {
 			// Only first read maps
-			if ((int)seq1->seq.l >= k) {
-				char* read_1kmer = malloc((k + 1) * sizeof(char));
-				if (read_1kmer) {
-					strncpy(read_1kmer, seq1->seq.s, k);
-					read_1kmer[k] = '\0';
-					
-					uint32_t h_row = kmer_hash(read_1kmer);
-					int h_col = 0;
-					
-					while (h_col < max_per_row && hashTable[h_row][h_col].kmer_seq[0]) {
-						if (strcmp(hashTable[h_row][h_col].kmer_seq, read_1kmer) == 0) {
-							hashTable[h_row][h_col].from_reads++;
-							break;
-						}
-						h_col++;
-					}
-					free(read_1kmer);
-				}
-			}
+			increment_kmer_count(seq1->seq.s, seq1->seq.l);
 		} else if (eq_class2) {
 			// Only second read maps
-			if ((int)seq2->seq.l >= k) {
-				char* read_1kmer = malloc((k + 1) * sizeof(char));
-				if (read_1kmer) {
-					strncpy(read_1kmer, seq2->seq.s, k);
-					read_1kmer[k] = '\0';
-					
-					uint32_t h_row = kmer_hash(read_1kmer);
-					int h_col = 0;
-					
-					while (h_col < max_per_row && hashTable[h_row][h_col].kmer_seq[0]) {
-						if (strcmp(hashTable[h_row][h_col].kmer_seq, read_1kmer) == 0) {
-							hashTable[h_row][h_col].from_reads++;
-							break;
-						}
-						h_col++;
-					}
-					free(read_1kmer);
-				}
-			}
+			increment_kmer_count(seq2->seq.s, seq2->seq.l);
 		}
 		// If neither read maps, skip this pair
 	}
@@ -1121,11 +1108,30 @@ void bootstrap_EM(int *lengths, double eps) {
 			printf("Bootstrap iteration %d/%d\n", bs + 1, bootstrap_samples);
 		}
 		
-		// Resample equivalence classes with replacement
+		// Proper bootstrap resampling with replacement
+		// First, calculate total read count
+		int total_reads = 0;
 		for(int i = 1; i < num_eqc_found; i++){
-			// Simple resampling: randomly select from original equivalence classes
-			int random_idx = 1 + (rand() % (num_eqc_found - 1));
-			eqc_arr[i].count = original_counts[random_idx];
+			total_reads += original_counts[i];
+		}
+		
+		// Reset all counts to 0
+		for(int i = 1; i < num_eqc_found; i++){
+			eqc_arr[i].count = 0;
+		}
+		
+		// Resample total_reads times with replacement
+		for(int r = 0; r < total_reads; r++){
+			// Use rejection sampling for uniform distribution
+			int random_idx;
+			int range = num_eqc_found - 1;
+			int limit = RAND_MAX - (RAND_MAX % range);
+			do {
+				random_idx = rand();
+			} while (random_idx >= limit);
+			random_idx = 1 + (random_idx % range);
+			
+			eqc_arr[random_idx].count++;
 		}
 		
 		// Run EM on resampled data
