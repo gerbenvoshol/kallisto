@@ -4,7 +4,10 @@ A reimplementation of kallisto, an RNA-seq quantification tool, in C. This is a 
 
 ## Features
 
-- **K-mer Indexing**: Builds a hash table index from transcriptome FASTA files
+- **K-mer Indexing**: Builds a hash table index from transcriptome FASTA/FASTQ files
+- **FASTQ/FASTA Support**: Uses kseq.h for efficient reading of both FASTA and FASTQ formats
+- **Gzipped File Support**: Can read compressed .gz files directly
+- **Dynamic Hash Table**: Hash table size automatically scales based on k-mer count
 - **Pseudoalignment**: Maps reads to transcripts using k-mer matching
 - **Equivalence Classes**: Groups reads by their compatible transcripts
 - **EM Algorithm**: Estimates transcript abundances using the EM algorithm
@@ -15,7 +18,18 @@ A reimplementation of kallisto, an RNA-seq quantification tool, in C. This is a 
 
 ### Prerequisites
 - GCC compiler (or compatible C compiler)
+- zlib development library (for gzipped file support)
 - Make (optional, for using Makefile)
+
+On Ubuntu/Debian:
+```bash
+sudo apt-get install build-essential zlib1g-dev
+```
+
+On macOS:
+```bash
+brew install gcc zlib
+```
 
 ### Compilation
 
@@ -26,7 +40,7 @@ make
 
 Or manually:
 ```bash
-gcc -Wall -Wextra -O2 -o kallisto kallisto.c -lm
+gcc -Wall -Wextra -O2 -o kallisto kallisto.c -lm -lz
 gcc -Wall -Wextra -O2 -o binary_convert Binary_convert.c
 ```
 
@@ -35,15 +49,22 @@ gcc -Wall -Wextra -O2 -o binary_convert Binary_convert.c
 ### Basic Usage
 
 ```bash
+# FASTA format
 ./kallisto -i transcriptome.fasta -r reads.fasta -o output.tsv
+
+# FASTQ format
+./kallisto -i transcriptome.fastq -r reads.fastq -o output.tsv
+
+# Gzipped files (automatically detected)
+./kallisto -i transcriptome.fasta.gz -r reads.fastq.gz -o output.tsv
 ```
 
 ### Command-line Options
 
 ```
 Required arguments:
-  -i, --index <file>        Transcriptome index/reference file (FASTA format)
-  -r, --reads <file>        Input reads file (FASTA format)
+  -i, --index <file>        Transcriptome index/reference file (FASTA/FASTQ format)
+  -r, --reads <file>        Input reads file (FASTA/FASTQ format, gzipped supported)
   -o, --output <file>       Output file for abundance estimates
 
 Optional arguments:
@@ -57,8 +78,14 @@ Optional arguments:
 ### Example
 
 ```bash
-# Quantify transcript abundances
+# Quantify transcript abundances with FASTA
 ./kallisto -i transcriptome.fasta -r sample.fasta -o abundances.tsv -k 31 -e 0.01
+
+# Quantify with FASTQ format
+./kallisto -i transcriptome.fasta -r sample.fastq -o abundances.tsv -k 31 -e 0.01
+
+# Quantify with gzipped files
+./kallisto -i transcriptome.fasta.gz -r sample.fastq.gz -o abundances.tsv -k 31 -e 0.01
 
 # Convert FASTA file (if needed)
 ./binary_convert input.fasta output.bin
@@ -66,7 +93,10 @@ Optional arguments:
 
 ## Input Format
 
-### Transcriptome File (FASTA)
+### Transcriptome File
+Both FASTA and FASTQ formats are supported. Files can be gzipped (.gz extension).
+
+**FASTA format:**
 ```
 >transcript1
 ATCGATCGATCG...
@@ -74,12 +104,39 @@ ATCGATCGATCG...
 GCTAGCTAGCTA...
 ```
 
-### Reads File (FASTA)
+**FASTQ format:**
+```
+@transcript1
+ATCGATCGATCG...
++
+IIIIIIIIIIII...
+@transcript2
+GCTAGCTAGCTA...
++
+IIIIIIIIIIII...
+```
+
+### Reads File
+Both FASTA and FASTQ formats are supported. Files can be gzipped (.gz extension).
+
+**FASTA format:**
 ```
 >read1
 ATCGATCGATCG...
 >read2
 GCTAGCTAGCTA...
+```
+
+**FASTQ format:**
+```
+@read1
+ATCGATCGATCG...
++
+IIIIIIIIIIII...
+@read2
+GCTAGCTAGCTA...
++
+IIIIIIIIIIII...
 ```
 
 ## Output Format
@@ -109,6 +166,10 @@ transcript2  1500      1500          200.00        66666.6667
 ## Implementation Notes
 
 ### Improvements from Original
+- **Integrated kseq.h**: Efficient reading of FASTA/FASTQ formats
+- **FASTQ support**: Can now process FASTQ files in addition to FASTA
+- **Gzipped file support**: Direct reading of .gz compressed files
+- **Dynamic hash table sizing**: Hash table size automatically scales based on k-mer count (load factor ~0.7)
 - Fixed critical memory bugs (boundary conditions, allocation errors)
 - Added comprehensive error checking for all file operations
 - Implemented proper memory management (fixed memory leaks)
@@ -120,16 +181,15 @@ transcript2  1500      1500          200.00        66666.6667
 
 ### Limitations
 - Uses simplified pseudoalignment (first k-mer only, not full de Bruijn graph)
-- Fixed hash table size (may need tuning for large datasets)
-- No support for gzipped files (yet)
 - No bootstrap support (yet)
 - Simplified effective length calculation
 
 ### Performance Considerations
-- Hash table size scales with transcriptome size
+- Hash table size dynamically scales with k-mer count (load factor ~0.7)
 - Memory usage: O(k * n) where k = k-mer size, n = number of transcripts
 - Time complexity: O(m * k) for indexing + O(r * k) for quantification
   where m = total transcript length, r = number of reads
+- kseq.h provides efficient buffered I/O for reading FASTA/FASTQ files
 
 ## Technical Details
 

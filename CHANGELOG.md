@@ -1,5 +1,56 @@
 # Changelog
 
+## Version 0.2.0 (2026-02-07)
+
+### Major Features
+
+#### kseq.h Integration
+- **Added** kseq.h library for efficient FASTA/FASTQ file reading
+- **Added** FASTQ format support (in addition to existing FASTA support)
+- **Added** Gzipped file support (.gz extension) for both FASTA and FASTQ
+- **Improved** File parsing robustness and efficiency with buffered I/O
+
+#### Dynamic Hash Table Sizing
+- **Changed** Hash table size from rough file-size estimate to precise k-mer counting
+- **Added** Two-pass approach: first count k-mers, then allocate hash table
+- **Improved** Hash table load factor set to ~0.7 for optimal performance
+- **Improved** Memory usage optimization based on actual transcript content
+
+### Technical Changes
+- **Replaced** custom FASTA parsing with kseq.h in `create_htable()`
+- **Replaced** custom FASTA parsing with kseq.h in `store_read_counts()`
+- **Added** `count_transcripts_and_kmers()` function for dynamic sizing
+- **Updated** Makefile to link with zlib (`-lz`)
+- **Fixed** Variable naming for clarity (n_seqs → n_transcripts)
+
+### Documentation Updates
+- **Updated** README.md with FASTQ/FASTQ format examples
+- **Updated** Prerequisites to include zlib development library
+- **Added** Examples for gzipped file usage
+- **Updated** Feature list and limitations
+- **Improved** Performance considerations section
+
+### Dependencies
+- **Added** zlib dependency for gzipped file support
+- **Added** kseq.h header file (MIT license)
+
+### Testing
+- Tested with FASTA format files
+- Tested with FASTQ format files
+- Tested with gzipped files (.fastq.gz)
+- All file formats verified working correctly
+- Code review completed with all feedback addressed
+- CodeQL security check passed
+
+### Known Limitations Addressed
+- ~~No support for gzipped files~~ ✓ Now supported
+- ~~Fixed hash table size~~ ✓ Now dynamic based on k-mer count
+
+### Backward Compatibility
+- Fully backward compatible with existing FASTA input files
+- Command-line interface unchanged
+- Output format unchanged
+
 ## Version 0.1.0 (2026-02-07)
 
 ### Initial Release - Complete Reimplementation
