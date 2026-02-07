@@ -748,7 +748,7 @@ static void worker_update_trans_probs(void *data, long idx, int tid) {
 		j++;
 	}
 	
-	for(int k = 0; k <= j; k++)
+	for(int k = 0; k < j; k++)
 		em_data->transcirpt_prob[i][eqc_arr[i].eq_class_labels[k]] = em_data->probs[eqc_arr[i].eq_class_labels[k]] / sum;
 }
 
