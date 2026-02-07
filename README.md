@@ -9,8 +9,10 @@ A reimplementation of kallisto, an RNA-seq quantification tool, in C. This is a 
 - **Gzipped File Support**: Can read compressed .gz files directly
 - **Dynamic Hash Table**: Hash table size automatically scales based on k-mer count
 - **Pseudoalignment**: Maps reads to transcripts using k-mer matching
+- **Paired-end Read Support**: Process paired-end reads for improved accuracy
 - **Equivalence Classes**: Groups reads by their compatible transcripts
 - **EM Algorithm**: Estimates transcript abundances using the EM algorithm
+- **Bootstrap Analysis**: Statistical uncertainty estimation through bootstrapping
 - **Multi-threading Support**: Uses kthread.h for parallel computation in EM algorithm
 - **Command-line Interface**: Full argument parsing with help and version info
 - **TSV Output**: Produces standard kallisto-compatible output format
@@ -51,17 +53,26 @@ gcc -Wall -Wextra -O2 -o binary_convert Binary_convert.c
 ### Basic Usage
 
 ```bash
-# FASTA format
+# Single-end mode with FASTA format
 ./kallisto -i transcriptome.fasta -r reads.fasta -o output.tsv
 
-# FASTQ format
+# Single-end mode with FASTQ format
 ./kallisto -i transcriptome.fastq -r reads.fastq -o output.tsv
+
+# Paired-end mode
+./kallisto -i transcriptome.fasta -1 reads_1.fastq -2 reads_2.fastq -o output.tsv
 
 # Gzipped files (automatically detected)
 ./kallisto -i transcriptome.fasta.gz -r reads.fastq.gz -o output.tsv
 
+# Paired-end with gzipped files
+./kallisto -i transcriptome.fasta.gz -1 reads_1.fastq.gz -2 reads_2.fastq.gz -o output.tsv
+
 # Use multiple threads for faster processing
 ./kallisto -i transcriptome.fasta -r reads.fasta -o output.tsv -t 4
+
+# With bootstrap for uncertainty estimation
+./kallisto -i transcriptome.fasta -r reads.fasta -o output.tsv -b 100
 ```
 
 ### Command-line Options
@@ -69,14 +80,21 @@ gcc -Wall -Wextra -O2 -o binary_convert Binary_convert.c
 ```
 Required arguments:
   -i, --index <file>        Transcriptome index/reference file (FASTA/FASTQ format)
-  -r, --reads <file>        Input reads file (FASTA/FASTQ format, gzipped supported)
   -o, --output <file>       Output file for abundance estimates
+
+Single-end mode:
+  -r, --reads <file>        Input reads file (FASTA/FASTQ format, gzipped supported)
+
+Paired-end mode:
+  -1, --reads1 <file>       First reads file (FASTA/FASTQ format, gzipped supported)
+  -2, --reads2 <file>       Second reads file (FASTA/FASTQ format, gzipped supported)
 
 Optional arguments:
   -k, --kmer-size <int>     K-mer size (default: 31)
   -e, --epsilon <float>     EM convergence threshold (default: 0.01)
   -m, --max-reads <int>     Maximum number of reads to process (default: all)
   -t, --threads <int>       Number of threads (default: 1)
+  -b, --bootstrap <int>     Number of bootstrap samples (default: 0)
   -h, --help                Display help message
   -v, --version             Display version information
 ```
@@ -84,14 +102,23 @@ Optional arguments:
 ### Example
 
 ```bash
-# Quantify transcript abundances with FASTA
+# Quantify transcript abundances with FASTA (single-end)
 ./kallisto -i transcriptome.fasta -r sample.fasta -o abundances.tsv -k 31 -e 0.01
 
-# Quantify with FASTQ format
+# Quantify with FASTQ format (single-end)
 ./kallisto -i transcriptome.fasta -r sample.fastq -o abundances.tsv -k 31 -e 0.01
+
+# Quantify with paired-end reads
+./kallisto -i transcriptome.fasta -1 sample_1.fastq -2 sample_2.fastq -o abundances.tsv -k 31 -e 0.01
 
 # Quantify with gzipped files
 ./kallisto -i transcriptome.fasta.gz -r sample.fastq.gz -o abundances.tsv -k 31 -e 0.01
+
+# Quantify with bootstrap (100 samples)
+./kallisto -i transcriptome.fasta -r sample.fastq -o abundances.tsv -b 100
+
+# Paired-end with bootstrap and multiple threads
+./kallisto -i transcriptome.fasta -1 sample_1.fastq.gz -2 sample_2.fastq.gz -o abundances.tsv -b 100 -t 4
 
 # Convert FASTA file (if needed)
 ./binary_convert input.fasta output.bin
@@ -149,6 +176,7 @@ IIIIIIIIIIII...
 
 The output is a tab-separated values (TSV) file with the following columns:
 
+### Standard Output (without bootstrap)
 - `target_id`: Transcript identifier
 - `length`: Transcript length
 - `eff_length`: Effective length (currently same as length)
@@ -160,6 +188,23 @@ Example output:
 target_id    length    eff_length    est_counts    tpm
 transcript1  1000      1000          150.00        75000.0000
 transcript2  1500      1500          200.00        66666.6667
+```
+
+### Bootstrap Output (with -b flag)
+When bootstrap is enabled, additional columns are added:
+- `target_id`: Transcript identifier
+- `length`: Transcript length
+- `eff_length`: Effective length (currently same as length)
+- `est_counts`: Estimated counts
+- `tpm`: Transcripts per million
+- `bs_mean_tpm`: Bootstrap mean TPM
+- `bs_std_tpm`: Bootstrap standard deviation of TPM
+
+Example output with bootstrap:
+```
+target_id    length    eff_length    est_counts    tpm         bs_mean_tpm  bs_std_tpm
+transcript1  1000      1000          150.00        75000.0000  74500.0000   1200.5000
+transcript2  1500      1500          200.00        66666.6667  66800.0000   800.3000
 ```
 
 ## Algorithm Overview
@@ -176,6 +221,8 @@ transcript2  1500      1500          200.00        66666.6667
 - **FASTQ support**: Can now process FASTQ files in addition to FASTA
 - **Gzipped file support**: Direct reading of .gz compressed files
 - **Dynamic hash table sizing**: Hash table size automatically scales based on k-mer count (load factor ~0.7)
+- **Paired-end read support**: Process paired-end reads for improved accuracy
+- **Bootstrap analysis**: Statistical uncertainty estimation with configurable sample count
 - **Multi-threading support**: Integrated kthread.h for parallel computation in EM algorithm
   - Parallelized update_alphas function across transcripts
   - Parallelized update_trans_probs function across equivalence classes
@@ -191,8 +238,8 @@ transcript2  1500      1500          200.00        66666.6667
 
 ### Limitations
 - Uses simplified pseudoalignment (first k-mer only, not full de Bruijn graph)
-- No bootstrap support (yet)
 - Simplified effective length calculation
+- Paired-end support uses simplified intersection approach
 
 ### Performance Considerations
 - Hash table size dynamically scales with k-mer count (load factor ~0.7)
