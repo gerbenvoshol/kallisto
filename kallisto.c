@@ -44,6 +44,8 @@ void create_htable(char * tscripts_file);
 void store_read_counts(char * reads_file, int max_reads);
 void store_paired_read_counts(char * reads_file1, char * reads_file2, int max_reads);
 int * get_equiv_class(char* kmer);
+int * compute_eq_class_intersection(int **eq_classes, int num_classes);
+void increment_eq_class_count(int *eq_class);
 void store_eqiv_classes();
 uint32_t murmurhash (const char *key, uint32_t len, uint32_t seed);
 char *clean(char *str);
@@ -87,6 +89,7 @@ int num_eq_classes;
 int max_line_length = 10000;  // Increased for longer sequences
 int num_eqc_found;
 int bootstrap_samples = 0;  // Number of bootstrap samples (0 = no bootstrap)
+int use_full_debruijn = 0;  // Use full de Bruijn graph (all k-mers) for pseudoalignment (0 = first k-mer only)
 
 char ** t_names;
 int * t_lengths;
@@ -110,6 +113,7 @@ void print_usage(const char *prog_name) {
 	fprintf(stderr, "  -m, --max-reads <int>     Maximum number of reads to process (default: all)\n");
 	fprintf(stderr, "  -t, --threads <int>       Number of threads (default: 1)\n");
 	fprintf(stderr, "  -b, --bootstrap <int>     Number of bootstrap samples (default: 0)\n");
+	fprintf(stderr, "  -d, --full-debruijn       Use full de Bruijn graph (all k-mers) for pseudoalignment\n");
 	fprintf(stderr, "  -h, --help                Display this help message\n");
 	fprintf(stderr, "  -v, --version             Display version information\n\n");
 }
@@ -143,6 +147,7 @@ int main(int argc, char *argv[])
 		{"max-reads",  required_argument, 0, 'm'},
 		{"threads",    required_argument, 0, 't'},
 		{"bootstrap",  required_argument, 0, 'b'},
+		{"full-debruijn", no_argument,    0, 'd'},
 		{"help",       no_argument,       0, 'h'},
 		{"version",    no_argument,       0, 'v'},
 		{0, 0, 0, 0}
@@ -151,7 +156,7 @@ int main(int argc, char *argv[])
 	int opt;
 	int option_index = 0;
 	
-	while ((opt = getopt_long(argc, argv, "i:r:1:2:o:k:e:m:t:b:hv", long_options, &option_index)) != -1) {
+	while ((opt = getopt_long(argc, argv, "i:r:1:2:o:k:e:m:t:b:dhv", long_options, &option_index)) != -1) {
 		switch (opt) {
 			case 'i':
 				index_file = optarg;
@@ -204,6 +209,9 @@ int main(int argc, char *argv[])
 					fprintf(stderr, "Error: bootstrap samples must be non-negative\n");
 					return 1;
 				}
+				break;
+			case 'd':
+				use_full_debruijn = 1;
 				break;
 			case 'h':
 				print_usage(argv[0]);
@@ -263,6 +271,7 @@ int main(int argc, char *argv[])
 	if (bootstrap_samples > 0) {
 		printf("Bootstrap:   %d samples\n", bootstrap_samples);
 	}
+	printf("Pseudoalignment: %s\n", use_full_debruijn ? "Full de Bruijn graph (all k-mers)" : "First k-mer only");
 	printf("\n");
 
 	create_htable(index_file);
@@ -521,47 +530,112 @@ void store_read_counts(char * reads_file, int max_reads)
 	while ((l = kseq_read(seq)) >= 0 && reads_processed < max_reads) {
 		reads_processed++;
 		
-		// We are using the 1st kmer of the sequence only to identify which transcript the fragment could have come from, as suggested.
-		// This is less accurate than the de brujin graph technique kallisto uses, but a necessary shortcut to finish this project in time.
 		if ((int)seq->seq.l < k) {
 			continue;  // Skip reads shorter than k-mer size
 		}
 		
-		char* read_1kmer = malloc((k + 1) * sizeof(char));
-		if (!read_1kmer) {
-			fprintf(stderr, "Error: Failed to allocate memory for kmer\n");
-			continue;
-		}
-		strncpy(read_1kmer, seq->seq.s, k);
-		read_1kmer[k] = '\0';
-
-		// find read_1kmer in hashTable and increment the from_reads count of it
-		uint32_t h_row = kmer_hash(read_1kmer);
-
-		int h_col = 0;
-		int k_start = 1;
-		int seq_len = seq->seq.l;
-		while (strcmp(hashTable[h_row][h_col].kmer_seq, read_1kmer) != 0) {
-			if (!(hashTable[h_row][h_col].kmer_seq[0])){
-				// Try next kmer in the sequence
-				if (k_start + k > seq_len) {
-					// No more kmers to try
-					break;
-				}
-				strncpy(read_1kmer, seq->seq.s + k_start, k);
-				read_1kmer[k] = '\0';
-				k_start++;
-				h_row = kmer_hash(read_1kmer);
-				h_col = -1;
+		if (use_full_debruijn) {
+			// Full de Bruijn graph approach: check all k-mers in the read
+			int seq_len = seq->seq.l;
+			int num_kmers = seq_len - k + 1;
+			
+			// Collect all equivalence classes from matching k-mers
+			int **eq_classes = malloc(num_kmers * sizeof(int*));
+			if (!eq_classes) {
+				continue;
 			}
-			h_col++;
-		}
+			
+			int num_matched = 0;
+			char* kmer_buf = malloc((k + 1) * sizeof(char));
+			if (!kmer_buf) {
+				free(eq_classes);
+				continue;
+			}
+			
+			// Try each k-mer in the read
+			for (int pos = 0; pos < num_kmers; pos++) {
+				strncpy(kmer_buf, seq->seq.s + pos, k);
+				kmer_buf[k] = '\0';
+				
+				// Look up this k-mer in the hash table
+				uint32_t h_row = kmer_hash(kmer_buf);
+				int h_col = 0;
+				
+				while (h_col < max_per_row) {
+					if (!hashTable[h_row][h_col].kmer_seq[0]) {
+						break;
+					}
+					if (strcmp(hashTable[h_row][h_col].kmer_seq, kmer_buf) == 0) {
+						// Found k-mer, store its equivalence class
+						int *eq_class = malloc(num_t * sizeof(int));
+						if (eq_class) {
+							for (int t = 0; t < num_t; t++) {
+								eq_class[t] = hashTable[h_row][h_col].t_labels[t];
+							}
+							eq_classes[num_matched++] = eq_class;
+						}
+						break;
+					}
+					h_col++;
+				}
+			}
+			
+			free(kmer_buf);
+			
+			// Compute intersection of all equivalence classes
+			if (num_matched > 0) {
+				int *intersection = compute_eq_class_intersection(eq_classes, num_matched);
+				if (intersection) {
+					increment_eq_class_count(intersection);
+					free(intersection);
+				}
+				
+				// Free allocated equivalence classes
+				for (int i = 0; i < num_matched; i++) {
+					free(eq_classes[i]);
+				}
+			}
+			
+			free(eq_classes);
+			
+		} else {
+			// Original approach: use first matching k-mer only
+			char* read_1kmer = malloc((k + 1) * sizeof(char));
+			if (!read_1kmer) {
+				fprintf(stderr, "Error: Failed to allocate memory for kmer\n");
+				continue;
+			}
+			strncpy(read_1kmer, seq->seq.s, k);
+			read_1kmer[k] = '\0';
 
-		if (hashTable[h_row][h_col].kmer_seq[0]){
-			hashTable[h_row][h_col].from_reads++; // only increment if sequence was found in table
+			// find read_1kmer in hashTable and increment the from_reads count of it
+			uint32_t h_row = kmer_hash(read_1kmer);
+
+			int h_col = 0;
+			int k_start = 1;
+			int seq_len = seq->seq.l;
+			while (strcmp(hashTable[h_row][h_col].kmer_seq, read_1kmer) != 0) {
+				if (!(hashTable[h_row][h_col].kmer_seq[0])){
+					// Try next kmer in the sequence
+					if (k_start + k > seq_len) {
+						// No more kmers to try
+						break;
+					}
+					strncpy(read_1kmer, seq->seq.s + k_start, k);
+					read_1kmer[k] = '\0';
+					k_start++;
+					h_row = kmer_hash(read_1kmer);
+					h_col = -1;
+				}
+				h_col++;
+			}
+
+			if (hashTable[h_row][h_col].kmer_seq[0]){
+				hashTable[h_row][h_col].from_reads++; // only increment if sequence was found in table
+			}
+			
+			free(read_1kmer);
 		}
-		
-		free(read_1kmer);
 	}
 	
 	kseq_destroy(seq);
@@ -571,45 +645,114 @@ void store_read_counts(char * reads_file, int max_reads)
 }
 
 // Helper function to find matching k-mer in hash table and get equivalence class
+// If use_full_debruijn is enabled, computes intersection of all k-mer equivalence classes
+// Otherwise, returns the first matching k-mer's equivalence class
 int* find_kmer_eq_class(char* seq_str, int seq_len) {
 	if (seq_len < k) {
 		return NULL;
 	}
 	
-	char* read_1kmer = malloc((k + 1) * sizeof(char));
-	if (!read_1kmer) {
+	if (use_full_debruijn) {
+		// Full de Bruijn graph: collect all k-mers and compute intersection
+		int num_kmers = seq_len - k + 1;
+		int **eq_classes = malloc(num_kmers * sizeof(int*));
+		if (!eq_classes) {
+			return NULL;
+		}
+		
+		int num_matched = 0;
+		char* kmer_buf = malloc((k + 1) * sizeof(char));
+		if (!kmer_buf) {
+			free(eq_classes);
+			return NULL;
+		}
+		
+		// Try each k-mer in the read
+		for (int pos = 0; pos < num_kmers; pos++) {
+			strncpy(kmer_buf, seq_str + pos, k);
+			kmer_buf[k] = '\0';
+			
+			// Look up this k-mer in the hash table
+			uint32_t h_row = kmer_hash(kmer_buf);
+			int h_col = 0;
+			
+			while (h_col < max_per_row) {
+				if (!hashTable[h_row][h_col].kmer_seq[0]) {
+					break;
+				}
+				if (strcmp(hashTable[h_row][h_col].kmer_seq, kmer_buf) == 0) {
+					// Found k-mer, store its equivalence class
+					int *eq_class = malloc(num_t * sizeof(int));
+					if (eq_class) {
+						for (int t = 0; t < num_t; t++) {
+							eq_class[t] = hashTable[h_row][h_col].t_labels[t];
+						}
+						eq_classes[num_matched++] = eq_class;
+					}
+					break;
+				}
+				h_col++;
+			}
+		}
+		
+		free(kmer_buf);
+		
+		// Compute intersection of all equivalence classes
+		int *intersection = NULL;
+		if (num_matched > 0) {
+			intersection = compute_eq_class_intersection(eq_classes, num_matched);
+			
+			// Free allocated equivalence classes
+			for (int i = 0; i < num_matched; i++) {
+				free(eq_classes[i]);
+			}
+		}
+		
+		free(eq_classes);
+		return intersection;
+		
+	} else {
+		// Original approach: return first matching k-mer's equivalence class
+		char* read_1kmer = malloc((k + 1) * sizeof(char));
+		if (!read_1kmer) {
+			return NULL;
+		}
+		
+		int k_start = 0;
+		int* eq_class = NULL;
+		
+		// Try multiple k-mers in the sequence
+		while (k_start + k <= seq_len) {
+			strncpy(read_1kmer, seq_str + k_start, k);
+			read_1kmer[k] = '\0';
+			
+			uint32_t h_row = kmer_hash(read_1kmer);
+			int h_col = 0;
+			
+			while (h_col < max_per_row) {
+				if (!hashTable[h_row][h_col].kmer_seq[0]) {
+					// Empty slot, k-mer not found in this position
+					break;
+				}
+				if (strcmp(hashTable[h_row][h_col].kmer_seq, read_1kmer) == 0) {
+					// Found the k-mer, allocate and copy its equivalence class
+					eq_class = malloc(num_t * sizeof(int));
+					if (eq_class) {
+						for (int t = 0; t < num_t; t++) {
+							eq_class[t] = hashTable[h_row][h_col].t_labels[t];
+						}
+					}
+					free(read_1kmer);
+					return eq_class;
+				}
+				h_col++;
+			}
+			k_start++;
+		}
+		
+		free(read_1kmer);
 		return NULL;
 	}
-	
-	int k_start = 0;
-	int* eq_class = NULL;
-	
-	// Try multiple k-mers in the sequence
-	while (k_start + k <= seq_len) {
-		strncpy(read_1kmer, seq_str + k_start, k);
-		read_1kmer[k] = '\0';
-		
-		uint32_t h_row = kmer_hash(read_1kmer);
-		int h_col = 0;
-		
-		while (h_col < max_per_row) {
-			if (!hashTable[h_row][h_col].kmer_seq[0]) {
-				// Empty slot, k-mer not found in this position
-				break;
-			}
-			if (strcmp(hashTable[h_row][h_col].kmer_seq, read_1kmer) == 0) {
-				// Found the k-mer, return its equivalence class
-				eq_class = hashTable[h_row][h_col].t_labels;
-				free(read_1kmer);
-				return eq_class;
-			}
-			h_col++;
-		}
-		k_start++;
-	}
-	
-	free(read_1kmer);
-	return NULL;
 }
 
 // Helper function to increment count for first matching k-mer in sequence
@@ -715,12 +858,18 @@ void store_paired_read_counts(char * reads_file1, char * reads_file2, int max_re
 			if (intersection_found) {
 				increment_kmer_count(seq1->seq.s, seq1->seq.l);
 			}
+			
+			// Free allocated memory
+			free(eq_class1);
+			free(eq_class2);
 		} else if (eq_class1) {
 			// Only first read maps
 			increment_kmer_count(seq1->seq.s, seq1->seq.l);
+			free(eq_class1);
 		} else if (eq_class2) {
 			// Only second read maps
 			increment_kmer_count(seq2->seq.s, seq2->seq.l);
+			free(eq_class2);
 		}
 		// If neither read maps, skip this pair
 	}
@@ -755,6 +904,97 @@ int * get_equiv_class(char* kmer)
 		eq_class[lab_idx] = hashTable[h_row][h_col].t_labels[lab_idx];
 	}
 	return eq_class;
+}
+
+// Compute intersection of multiple equivalence classes
+// Returns a new equivalence class array containing only transcripts present in ALL input classes
+int * compute_eq_class_intersection(int **eq_classes, int num_classes) {
+	if (num_classes == 0) {
+		return NULL;
+	}
+	
+	if (num_classes == 1) {
+		// Single class, just copy it
+		int *result = malloc(num_t * sizeof(int));
+		if (!result) {
+			return NULL;
+		}
+		for (int i = 0; i < num_t; i++) {
+			result[i] = eq_classes[0][i];
+		}
+		return result;
+	}
+	
+	// Start with first class
+	int *intersection = malloc(num_t * sizeof(int));
+	if (!intersection) {
+		return NULL;
+	}
+	
+	// Initialize with all -1
+	for (int i = 0; i < num_t; i++) {
+		intersection[i] = -1;
+	}
+	
+	int intersection_count = 0;
+	
+	// For each transcript in the first class
+	for (int i = 0; i < num_t && eq_classes[0][i] != -1; i++) {
+		int transcript_id = eq_classes[0][i];
+		int in_all_classes = 1;
+		
+		// Check if this transcript is in all other classes
+		for (int c = 1; c < num_classes; c++) {
+			int found = 0;
+			for (int j = 0; j < num_t && eq_classes[c][j] != -1; j++) {
+				if (eq_classes[c][j] == transcript_id) {
+					found = 1;
+					break;
+				}
+			}
+			if (!found) {
+				in_all_classes = 0;
+				break;
+			}
+		}
+		
+		if (in_all_classes) {
+			intersection[intersection_count++] = transcript_id;
+		}
+	}
+	
+	return intersection;
+}
+
+// Increment count for an equivalence class by finding matching k-mer in hash table
+void increment_eq_class_count(int *eq_class) {
+	if (!eq_class || eq_class[0] == -1) {
+		return;
+	}
+	
+	// Find a k-mer in the hash table that has this equivalence class
+	// We'll search through the hash table to find a matching entry
+	for (int i = 0; i < max_hasht_rows; i++) {
+		for (int j = 0; j < max_per_row; j++) {
+			if (!hashTable[i][j].kmer_seq[0]) {
+				continue;
+			}
+			
+			// Check if this k-mer's equivalence class matches
+			int matches = 1;
+			for (int t = 0; t < num_t; t++) {
+				if (hashTable[i][j].t_labels[t] != eq_class[t]) {
+					matches = 0;
+					break;
+				}
+			}
+			
+			if (matches) {
+				hashTable[i][j].from_reads++;
+				return;
+			}
+		}
+	}
 }
 
 

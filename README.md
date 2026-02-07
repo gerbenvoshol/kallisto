@@ -95,6 +95,7 @@ Optional arguments:
   -m, --max-reads <int>     Maximum number of reads to process (default: all)
   -t, --threads <int>       Number of threads (default: 1)
   -b, --bootstrap <int>     Number of bootstrap samples (default: 0)
+  -d, --full-debruijn       Use full de Bruijn graph (all k-mers) for pseudoalignment
   -h, --help                Display help message
   -v, --version             Display version information
 ```
@@ -119,6 +120,12 @@ Optional arguments:
 
 # Paired-end with bootstrap and multiple threads
 ./kallisto -i transcriptome.fasta -1 sample_1.fastq.gz -2 sample_2.fastq.gz -o abundances.tsv -b 100 -t 4
+
+# With full de Bruijn graph for more accurate pseudoalignment
+./kallisto -i transcriptome.fasta -r sample.fastq -o abundances.tsv -d
+
+# Paired-end with full de Bruijn graph
+./kallisto -i transcriptome.fasta -1 sample_1.fastq.gz -2 sample_2.fastq.gz -o abundances.tsv -d
 
 # Convert FASTA file (if needed)
 ./binary_convert input.fasta output.bin
@@ -237,9 +244,13 @@ transcript2  1500      1500          200.00        66666.6667  66800.0000   800.
 - Fixed compiler warnings
 
 ### Limitations
-- Uses simplified pseudoalignment (first k-mer only, not full de Bruijn graph)
 - Simplified effective length calculation
 - Paired-end support uses simplified intersection approach
+
+### Pseudoalignment Options
+The implementation supports two pseudoalignment modes:
+1. **First k-mer only (default)**: Uses only the first matching k-mer from each read for pseudoalignment. This is faster but less accurate.
+2. **Full de Bruijn graph (--full-debruijn flag)**: Examines all k-mers in each read and computes the intersection of their equivalence classes. This is more accurate and matches the approach used by the original kallisto, but is computationally more intensive.
 
 ### Performance Considerations
 - Hash table size dynamically scales with k-mer count (load factor ~0.7)
