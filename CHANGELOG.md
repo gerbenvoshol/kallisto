@@ -1,5 +1,71 @@
 # Changelog
 
+## Version 0.3.0 (2026-02-07)
+
+### Major Features
+
+#### Paired-end Read Support
+- **Added** Paired-end read processing with `-1` and `-2` options
+- **Added** Automatic equivalence class intersection for paired reads
+- **Added** Support for gzipped paired-end files
+- **Improved** Read mapping accuracy with paired-end information
+- **Added** Validation to ensure both read files have equal read counts
+
+#### Bootstrap Analysis
+- **Added** Bootstrap support with `-b` option for uncertainty estimation
+- **Added** Statistical resampling of equivalence classes
+- **Added** Mean and standard deviation calculation across bootstrap samples
+- **Added** Extended output format with bootstrap statistics (bs_mean_tpm, bs_std_tpm)
+- **Added** Random seed initialization for reproducible bootstrap sampling
+- **Improved** Output format to include uncertainty estimates when bootstrap is enabled
+
+### Technical Changes
+- **Added** `store_paired_read_counts()` function for paired-end processing
+- **Added** `find_kmer_eq_class()` helper function for k-mer lookup
+- **Added** `bootstrap_EM()` function for bootstrap analysis
+- **Added** `run_EM_iteration()` helper function for single EM runs
+- **Added** `write_abundances_with_bootstrap()` for extended output format
+- **Refactored** EM algorithm to support both regular and bootstrap modes
+- **Added** Command-line option parsing for `-1`, `-2`, and `-b` flags
+- **Updated** Help text to document new paired-end and bootstrap options
+- **Added** `time.h` include for random number seeding
+
+### Command-line Interface
+- **Added** `-1, --reads1` option for first paired-end read file
+- **Added** `-2, --reads2` option for second paired-end read file
+- **Added** `-b, --bootstrap` option for bootstrap sample count
+- **Changed** `-r, --reads` is now optional when using paired-end mode
+- **Improved** Error checking for mutually exclusive read options
+- **Improved** Help text organization with separate single-end and paired-end sections
+
+### Documentation Updates
+- **Updated** README.md with paired-end and bootstrap examples
+- **Updated** USAGE.md with detailed paired-end usage instructions
+- **Added** Bootstrap parameter selection guide
+- **Added** Examples for differential expression analysis with bootstrap
+- **Updated** Output format documentation to include bootstrap columns
+- **Updated** Feature list to include new capabilities
+- **Added** Read mode selection guidelines
+
+### Version Information
+- **Updated** Version number to 0.3.0
+- **Updated** Help and version output
+
+### Testing
+- Compiles cleanly without warnings
+- Help text displays correctly
+- All new options parse correctly
+
+### Known Limitations
+- Paired-end support uses simplified intersection approach
+- Bootstrap sampling uses basic random resampling (not parametric bootstrap)
+- No persistence of bootstrap results to separate files
+
+### Backward Compatibility
+- Fully backward compatible with existing single-end workflows
+- Command-line interface unchanged for single-end mode
+- Standard output format unchanged when bootstrap is disabled
+
 ## Version 0.2.0 (2026-02-07)
 
 ### Major Features

@@ -28,26 +28,43 @@ You need two FASTA files:
 ### Example 1: Basic Quantification
 
 ```bash
-# With default k-mer size (31)
+# Single-end with default k-mer size (31)
 ./kallisto -i reference.fasta -r sample1.fasta -o sample1_abundance.tsv
+
+# Paired-end with default settings
+./kallisto -i reference.fasta -1 sample1_R1.fastq -2 sample1_R2.fastq -o sample1_abundance.tsv
 
 # With custom k-mer size
 ./kallisto -i reference.fasta -r sample1.fasta -o sample1_abundance.tsv -k 25
 
 # With stricter convergence
 ./kallisto -i reference.fasta -r sample1.fasta -o sample1_abundance.tsv -e 0.001
+
+# With bootstrap for uncertainty estimation
+./kallisto -i reference.fasta -r sample1.fasta -o sample1_abundance.tsv -b 100
 ```
 
 ### Example 2: Processing Multiple Samples
 
 ```bash
-# Process multiple samples in a loop
+# Process multiple single-end samples in a loop
 for sample in sample1 sample2 sample3; do
     ./kallisto -i reference.fasta \
                -r ${sample}.fasta \
                -o ${sample}_abundance.tsv \
                -k 31 \
                -e 0.01
+done
+
+# Process multiple paired-end samples
+for sample in sample1 sample2 sample3; do
+    ./kallisto -i reference.fasta \
+               -1 ${sample}_R1.fastq.gz \
+               -2 ${sample}_R2.fastq.gz \
+               -o ${sample}_abundance.tsv \
+               -k 31 \
+               -e 0.01 \
+               -t 4
 done
 ```
 
@@ -72,6 +89,7 @@ done
 
 The output TSV file contains the following columns:
 
+### Standard Output (without bootstrap)
 1. **target_id**: Transcript identifier (from FASTA header)
 2. **length**: Transcript length in nucleotides
 3. **eff_length**: Effective length (currently same as length)
@@ -85,23 +103,41 @@ transcript_A    1500    1500        234.56      156789.1234
 transcript_B    2000    2000        123.45      61725.0000
 ```
 
+### Bootstrap Output (with -b flag)
+When bootstrap is enabled, two additional columns are added:
+6. **bs_mean_tpm**: Mean TPM across bootstrap samples
+7. **bs_std_tpm**: Standard deviation of TPM across bootstrap samples
+
+Example output with bootstrap:
+```
+target_id       length  eff_length  est_counts  tpm          bs_mean_tpm  bs_std_tpm
+transcript_A    1500    1500        234.56      156789.1234  156500.0000  2500.0000
+transcript_B    2000    2000        123.45      61725.0000   61800.0000   1200.0000
+```
+
 ## Common Use Cases
 
 ### Differential Expression Analysis Setup
 
 ```bash
-# Quantify control samples
+# Quantify control samples (paired-end with bootstrap)
 for i in {1..3}; do
     ./kallisto -i reference.fasta \
-               -r control_${i}.fasta \
-               -o control_${i}_abundance.tsv
+               -1 control_${i}_R1.fastq.gz \
+               -2 control_${i}_R2.fastq.gz \
+               -o control_${i}_abundance.tsv \
+               -b 100 \
+               -t 4
 done
 
-# Quantify treatment samples
+# Quantify treatment samples (paired-end with bootstrap)
 for i in {1..3}; do
     ./kallisto -i reference.fasta \
-               -r treatment_${i}.fasta \
-               -o treatment_${i}_abundance.tsv
+               -1 treatment_${i}_R1.fastq.gz \
+               -2 treatment_${i}_R2.fastq.gz \
+               -o treatment_${i}_abundance.tsv \
+               -b 100 \
+               -t 4
 done
 ```
 
@@ -136,6 +172,24 @@ done
   - Testing/debugging
   - Quick quality checks
   - Memory-constrained systems
+
+### Bootstrap Samples (`-b`)
+- **Default: 0** - No bootstrap analysis
+- **Recommended: 100** - Good balance of accuracy and computation time
+- **Higher values (500-1000)**: More accurate uncertainty estimates but slower
+- Bootstrap provides statistical confidence in abundance estimates
+- Essential for differential expression analysis
+
+### Read Mode Selection
+- **Single-end (`-r`)**: Use when you have single-end sequencing data
+  - One file per sample
+  - Simpler and faster
+  - Good for many applications
+- **Paired-end (`-1` and `-2`)**: Use when you have paired-end sequencing data
+  - Two files per sample (forward and reverse reads)
+  - More accurate quantification
+  - Better for isoform disambiguation
+  - Recommended for high-quality RNA-seq experiments
 
 ## Troubleshooting
 
