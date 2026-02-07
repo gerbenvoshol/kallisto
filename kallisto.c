@@ -11,6 +11,11 @@
 #include <float.h>
 #include <stdint.h>
 #include <getopt.h>
+#include <zlib.h>
+#include "kseq.h"
+
+// Initialize kseq for FILE* reading
+KSEQ_INIT(gzFile, gzread)
 
 #define VERSION "0.1.0"
 
@@ -58,7 +63,7 @@ double likelihood(double *alpha, int *lengths);
 kmer_labeled **hashTable;
 eq_c_count *eqc_arr;
 int tr_name_chars = 100;  // Increased for longer names
-int max_hasht_rows = 1000;
+int max_hasht_rows = 0;  // Will be set dynamically based on k-mer count
 int max_per_row = 10;
 int k = 31;  // Default k-mer size (kallisto default)
 int num_t = 125;
@@ -74,8 +79,8 @@ void print_usage(const char *prog_name) {
 	fprintf(stderr, "kallisto C implementation v%s\n\n", VERSION);
 	fprintf(stderr, "Usage: %s [options] -i <index> -o <output>\n\n", prog_name);
 	fprintf(stderr, "Required arguments:\n");
-	fprintf(stderr, "  -i, --index <file>        Transcriptome index/reference file (FASTA format)\n");
-	fprintf(stderr, "  -r, --reads <file>        Input reads file (FASTA format)\n");
+	fprintf(stderr, "  -i, --index <file>        Transcriptome index/reference file (FASTA/FASTQ format)\n");
+	fprintf(stderr, "  -r, --reads <file>        Input reads file (FASTA/FASTQ format, gzipped supported)\n");
 	fprintf(stderr, "  -o, --output <file>       Output file for abundance estimates\n\n");
 	fprintf(stderr, "Optional arguments:\n");
 	fprintf(stderr, "  -k, --kmer-size <int>     K-mer size (default: 31)\n");
@@ -242,39 +247,36 @@ char** get_kmers(char* seq, int k, int *size)
 }
 
 
-// This method returns the amount of characters in 
-// the given *file
-int fileSize(char *file){
-	FILE *fptr;
-	char ch;
-	fptr=fopen(file,"rb");
-	
-	if (!fptr) {
+// This method counts transcripts and estimates total k-mers
+// Returns the number of transcripts
+int count_transcripts_and_kmers(char *file, int *total_kmers){
+	gzFile fp = gzopen(file, "r");
+	if (!fp) {
 		fprintf(stderr, "Error: Could not open file '%s'\n", file);
 		return -1;
 	}
-
-	int count = 0;
-	num_t = 0;
-	while((ch=fgetc(fptr))!=EOF) {
-		count++;
-		if (ch == '\n'){
-			num_t++;
+	
+	kseq_t *seq = kseq_init(fp);
+	int n_seqs = 0;
+	int n_kmers = 0;
+	int64_t l;
+	
+	while ((l = kseq_read(seq)) >= 0) {
+		n_seqs++;
+		int seq_len = seq->seq.l;
+		if (seq_len >= k) {
+			n_kmers += seq_len - k + 1;
 		}
 	}
 	
-	// Handle case where last line doesn't have newline
-	if (count > 0 && ch != '\n') {
-		num_t++;
-	}
+	kseq_destroy(seq);
+	gzclose(fp);
 	
-	num_t /= 2; // there are two lines (name and sequence) for every transcript in the file
-	printf("number of transcripts = %d\n", num_t);
-	fclose(fptr);
-
-	return count;	/* This is the number of characters in fasta file,
-			 * which is a VERY ROUGH way to bound the hash size.
-			 */
+	*total_kmers = n_kmers;
+	printf("Number of transcripts = %d\n", n_seqs);
+	printf("Estimated total k-mers = %d\n", n_kmers);
+	
+	return n_seqs;
 }
 
 
@@ -288,12 +290,22 @@ void store_name_at_idx(char * name, int t_name_id){
 void create_htable(char * tscripts_file)
 //void create_htable()
 {
-	int file_size = fileSize(tscripts_file);
-	if (file_size < 0) {
-		fprintf(stderr, "Error: Failed to read file size\n");
+	// First pass: count transcripts and k-mers to determine hash table size
+	int total_kmers = 0;
+	num_t = count_transcripts_and_kmers(tscripts_file, &total_kmers);
+	
+	if (num_t < 0) {
+		fprintf(stderr, "Error: Failed to count transcripts\n");
 		exit(1);
 	}
-	max_hasht_rows = file_size * 0.5;	/* rough */
+	
+	// Set hash table size dynamically based on k-mer count
+	// Use a load factor of ~0.7 for good performance
+	max_hasht_rows = (int)(total_kmers / 0.7);
+	if (max_hasht_rows < 1000) max_hasht_rows = 1000;  // Minimum size
+	
+	printf("Setting hash table size to %d rows (load factor ~0.7)\n", max_hasht_rows);
+	
 	t_names = calloc(num_t, sizeof(char*));
 	t_lengths = calloc(num_t, sizeof(int));
 	
@@ -331,49 +343,35 @@ void create_htable(char * tscripts_file)
 	}
 	printf("Hash table initialized\n");
 
-	FILE * tscripts_filep = fopen(tscripts_file, "rb");
-	if (!tscripts_filep) {
+	// Second pass: read sequences and populate hash table using kseq
+	gzFile fp = gzopen(tscripts_file, "r");
+	if (!fp) {
 		fprintf(stderr, "Error: Could not open transcripts file '%s'\n", tscripts_file);
 		exit(1);
 	}
 	
+	kseq_t *seq = kseq_init(fp);
 	int t_name_id = 0;
-	while(!feof(tscripts_filep)){
-
-		char *name	 = malloc(max_line_length * sizeof(char));
-		char *seq	 = malloc(max_line_length * sizeof(char));
+	int64_t l;
+	
+	while ((l = kseq_read(seq)) >= 0) {
+		// Store transcript name
+		store_name_at_idx(seq->name.s, t_name_id);
 		
-		if (!name || !seq) {
-			fprintf(stderr, "Error: Failed to allocate memory for reading transcript\n");
-			exit(1);
-		}
+		// Store transcript length
+		t_lengths[t_name_id] = seq->seq.l;
 
-		if (!fgets(name, max_line_length, tscripts_filep)) break;
-		if (!fgets(seq, max_line_length, tscripts_filep)) {
-			free(name);
-			free(seq);
-			break;
-		}
-
-		// cleaning the name for the hash function
-		name = clean(name);
-		seq = clean(seq);  // Also clean sequence to remove newline
-
-		store_name_at_idx(name, t_name_id);
-		int l_t = strlen(seq); // needed for EM algo
-		t_lengths[t_name_id] = l_t;
-
+		// Generate and store k-mers
 		int size = 0;
-		char** kmers = get_kmers(seq, k, &size);
+		char** kmers = get_kmers(seq->seq.s, k, &size);
 		
 		if (!kmers) {
-			free(name);
-			free(seq);
+			t_name_id++;
 			continue;
 		}
 
 		for (int i = 0; i < size; i++){
-			char * kmer = kmers[i];  // No need to malloc and copy, use directly
+			char * kmer = kmers[i];
 			uint32_t h_row = kmer_hash(kmer);
 			int h_col = 0;
 
@@ -407,62 +405,44 @@ void create_htable(char * tscripts_file)
 			free(kmers[i]);
 		}
 		free(kmers);
-		free(name);
-		free(seq);
 		t_name_id++;
 	}
-	fclose(tscripts_filep);
+	
+	kseq_destroy(seq);
+	gzclose(fp);
+	
 	printf("Done reading transcripts and storing kmers in hash table!\n\n");
 }
 
 void store_read_counts(char * reads_file, int max_reads)
 {
-	FILE* reads_filep = fopen(reads_file, "rb");
-	
-	if (!reads_filep) {
+	gzFile fp = gzopen(reads_file, "r");
+	if (!fp) {
 		fprintf(stderr, "Error: Could not open reads file '%s'\n", reads_file);
 		exit(1);
 	}
+	
+	kseq_t *seq = kseq_init(fp);
+	int64_t l;
 
 	printf("Reading reads \n");
 
-	int early_stop = 0;
-	while(!feof(reads_filep) && early_stop < max_reads){
-		early_stop++;
-
-		char *name	 = malloc(max_line_length * sizeof(char));
-		char *seq	 = malloc(max_line_length * sizeof(char));
+	int reads_processed = 0;
+	while ((l = kseq_read(seq)) >= 0 && reads_processed < max_reads) {
+		reads_processed++;
 		
-		if (!name || !seq) {
-			fprintf(stderr, "Error: Failed to allocate memory for reading reads\n");
-			exit(1);
-		}
-
-		if (!fgets(name, max_line_length, reads_filep)) {
-			free(name);
-			free(seq);
-			break;
-		}
-		if (!fgets(seq, max_line_length, reads_filep)) {
-			free(name);
-			free(seq);
-			break;
-		}
-
-		// For the hash table
-		name = clean(name);
-		seq = clean(seq);
-
 		// We are using the 1st kmer of the sequence only to identify which transcript the fragment could have come from, as suggested.
 		// This is less accurate than the de brujin graph technique kallisto uses, but a necessary shortcut to finish this project in time.
+		if ((int)seq->seq.l < k) {
+			continue;  // Skip reads shorter than k-mer size
+		}
+		
 		char* read_1kmer = malloc((k + 1) * sizeof(char));
 		if (!read_1kmer) {
 			fprintf(stderr, "Error: Failed to allocate memory for kmer\n");
-			free(name);
-			free(seq);
 			continue;
 		}
-		strncpy(read_1kmer, seq, k);
+		strncpy(read_1kmer, seq->seq.s, k);
 		read_1kmer[k] = '\0';
 
 		// find read_1kmer in hashTable and increment the from_reads count of it
@@ -470,7 +450,7 @@ void store_read_counts(char * reads_file, int max_reads)
 
 		int h_col = 0;
 		int k_start = 1;
-		int seq_len = strlen(seq);
+		int seq_len = seq->seq.l;
 		while (strcmp(hashTable[h_row][h_col].kmer_seq, read_1kmer) != 0) {
 			if (!(hashTable[h_row][h_col].kmer_seq[0])){
 				// Try next kmer in the sequence
@@ -478,7 +458,7 @@ void store_read_counts(char * reads_file, int max_reads)
 					// No more kmers to try
 					break;
 				}
-				strncpy(read_1kmer, seq + k_start, k);
+				strncpy(read_1kmer, seq->seq.s + k_start, k);
 				read_1kmer[k] = '\0';
 				k_start++;
 				h_row = kmer_hash(read_1kmer);
@@ -491,12 +471,13 @@ void store_read_counts(char * reads_file, int max_reads)
 			hashTable[h_row][h_col].from_reads++; // only increment if sequence was found in table
 		}
 		
-		free(name);
-		free(seq);
 		free(read_1kmer);
 	}
-	fclose(reads_filep);
-	printf("Done storing read counts! \n\n");
+	
+	kseq_destroy(seq);
+	gzclose(fp);
+	
+	printf("Done storing read counts (processed %d reads)! \n\n", reads_processed);
 }
 
 // returns the list of T-labels associated with the k-mer sequence from the hash table, including -1s

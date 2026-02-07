@@ -2,7 +2,7 @@
 
 CC = gcc
 CFLAGS = -Wall -Wextra -O2 -std=c99
-LDFLAGS = -lm
+LDFLAGS = -lm -lz
 
 TARGET = kallisto
 BINARY_CONVERT = binary_convert
