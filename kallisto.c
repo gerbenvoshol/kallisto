@@ -929,7 +929,7 @@ void compare(double *probs){
 	for(int i = 0; i < num_t; i++){
 		double p = (double) d[i] / tot;
 		error += pow((p - probs[i + 1]), 2);
-		printf("%s \t %lf \t %lf\n", t_names[i + 1], p, probs[i + 1]);
+		printf("%s \t %lf \t %lf\n", t_names[i], p, probs[i + 1]);  // Fixed: t_names is 0-indexed
 	}
 
 	printf("The MSE is %lf\n", (error/num_t));
@@ -961,7 +961,7 @@ void write_abundances(const char *output_file, double *probs) {
 		double est_counts = probs[i] * t_lengths[i - 1];
 		
 		fprintf(out, "%s\t%d\t%d\t%.2f\t%.4f\n", 
-			t_names[i], 
+			t_names[i - 1],  // Fixed: t_names is 0-indexed
 			t_lengths[i - 1],
 			t_lengths[i - 1],  // effective length (simplified, same as length)
 			est_counts,
