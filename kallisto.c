@@ -1005,6 +1005,7 @@ void EM(int *lengths, double eps){
 		// This is the output of the EM (for validation if real.txt exists)
 		compare(probs);
 		
+		// Free the probs we allocated here
 		free(probs);
 	}
 }
@@ -1215,7 +1216,7 @@ void update_trans_probs(double *probs, double **transcirpt_prob){
 				j++;
 			}
 
-			for(int k = 0; k <= j; k++)
+			for(int k = 0; k < j; k++)
 				transcirpt_prob[i][eqc_arr[i].eq_class_labels[k]] = probs[eqc_arr[i].eq_class_labels[k]] / sum;
 		}
 	}
