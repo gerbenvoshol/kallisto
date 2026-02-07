@@ -1,5 +1,6 @@
 /*
- *[KSD] compile with -DKSD to get corrected code.
+ * Kallisto C Implementation
+ * A reimplementation of kallisto RNA-seq quantification tool in C
  */
 
 #include <stdio.h>
@@ -9,6 +10,9 @@
 #include <math.h>
 #include <float.h>
 #include <stdint.h>
+#include <getopt.h>
+
+#define VERSION "0.1.0"
 
 typedef struct{
 	char * kmer_seq; // the kmer sequence
@@ -22,6 +26,7 @@ typedef struct{
 	int * eq_class_labels; // list of labels of transcripts that contain the k-mer
 } eq_c_count;
 
+// Function prototypes
 uint32_t kmer_hash(char * kmer_seq);
 uint32_t eq_hash(char * eq_class);
 void store_name_idx(char * name, int t_name_idx);
@@ -36,7 +41,9 @@ void print_eqc_arr();
 void print_t_lengths();
 void free_hashTable();
 void compare(double *probs);
-
+void print_usage(const char *prog_name);
+void print_version();
+void write_abundances(const char *output_file, double *probs);
 
 //EM related
 void EM(int *lengths, double eps);
@@ -47,39 +54,139 @@ void update_trans_probs(double *probs, double **transcirpt_prob);
 double **alloc_matrix(int n, int r);
 double likelihood(double *alpha, int *lengths);
 
+// Global variables
 kmer_labeled **hashTable;
 eq_c_count *eqc_arr;
-int tr_name_chars = 13;
+int tr_name_chars = 100;  // Increased for longer names
 int max_hasht_rows = 1000;
 int max_per_row = 10;
-int k = 50;
+int k = 31;  // Default k-mer size (kallisto default)
 int num_t = 125;
 int num_eq_classes;
-int max_line_length = 7000;
+int max_line_length = 10000;  // Increased for longer sequences
 int num_eqc_found;
 
 char ** t_names;
 int * t_lengths;
+char * g_output_file = NULL;  // Global output file path
 
+void print_usage(const char *prog_name) {
+	fprintf(stderr, "kallisto C implementation v%s\n\n", VERSION);
+	fprintf(stderr, "Usage: %s [options] -i <index> -o <output>\n\n", prog_name);
+	fprintf(stderr, "Required arguments:\n");
+	fprintf(stderr, "  -i, --index <file>        Transcriptome index/reference file (FASTA format)\n");
+	fprintf(stderr, "  -r, --reads <file>        Input reads file (FASTA format)\n");
+	fprintf(stderr, "  -o, --output <file>       Output file for abundance estimates\n\n");
+	fprintf(stderr, "Optional arguments:\n");
+	fprintf(stderr, "  -k, --kmer-size <int>     K-mer size (default: 31)\n");
+	fprintf(stderr, "  -e, --epsilon <float>     EM convergence threshold (default: 0.01)\n");
+	fprintf(stderr, "  -m, --max-reads <int>     Maximum number of reads to process (default: all)\n");
+	fprintf(stderr, "  -h, --help                Display this help message\n");
+	fprintf(stderr, "  -v, --version             Display version information\n\n");
+}
 
-int main()
+void print_version() {
+	printf("kallisto C implementation version %s\n", VERSION);
+}
+
+int main(int argc, char *argv[])
 {
+	char *index_file = NULL;
+	char *reads_file = NULL;
+	char *output_file = NULL;
+	int max_reads = INT_MAX;
+	double epsilon = 0.01;
+	
+	static struct option long_options[] = {
+		{"index",      required_argument, 0, 'i'},
+		{"reads",      required_argument, 0, 'r'},
+		{"output",     required_argument, 0, 'o'},
+		{"kmer-size",  required_argument, 0, 'k'},
+		{"epsilon",    required_argument, 0, 'e'},
+		{"max-reads",  required_argument, 0, 'm'},
+		{"help",       no_argument,       0, 'h'},
+		{"version",    no_argument,       0, 'v'},
+		{0, 0, 0, 0}
+	};
+	
+	int opt;
+	int option_index = 0;
+	
+	while ((opt = getopt_long(argc, argv, "i:r:o:k:e:m:hv", long_options, &option_index)) != -1) {
+		switch (opt) {
+			case 'i':
+				index_file = optarg;
+				break;
+			case 'r':
+				reads_file = optarg;
+				break;
+			case 'o':
+				output_file = optarg;
+				break;
+			case 'k':
+				k = atoi(optarg);
+				if (k <= 0 || k > 100) {
+					fprintf(stderr, "Error: k-mer size must be between 1 and 100\n");
+					return 1;
+				}
+				break;
+			case 'e':
+				epsilon = atof(optarg);
+				if (epsilon <= 0) {
+					fprintf(stderr, "Error: epsilon must be positive\n");
+					return 1;
+				}
+				break;
+			case 'm':
+				max_reads = atoi(optarg);
+				if (max_reads <= 0) {
+					fprintf(stderr, "Error: max-reads must be positive\n");
+					return 1;
+				}
+				break;
+			case 'h':
+				print_usage(argv[0]);
+				return 0;
+			case 'v':
+				print_version();
+				return 0;
+			default:
+				print_usage(argv[0]);
+				return 1;
+		}
+	}
+	
+	// Check required arguments
+	if (!index_file || !reads_file || !output_file) {
+		fprintf(stderr, "Error: Missing required arguments\n\n");
+		print_usage(argv[0]);
+		return 1;
+	}
+	
+	// Set global output file
+	g_output_file = output_file;
+	
+	printf("Kallisto C implementation v%s\n", VERSION);
+	printf("Index file:  %s\n", index_file);
+	printf("Reads file:  %s\n", reads_file);
+	printf("Output file: %s\n", output_file);
+	printf("K-mer size:  %d\n", k);
+	printf("Epsilon:     %f\n", epsilon);
+	printf("\n");
 
-	char * tscripts_file = "transcriptome_gffread.bin";
-	create_htable(tscripts_file);
+	create_htable(index_file);
 
-	char * reads_file = "./simdata/cov_100_readlen_150_paired_FALSE/sample_02.fasta";
-	store_read_counts(reads_file, INT_MAX);
+	store_read_counts(reads_file, max_reads);
 	store_eqiv_classes();
 
 	// Freeing the hash table because is not needed for the EM
 	free_hashTable();
 
-	printf("Eqivalence classes: \n");
+	printf("Equivalence classes: \n");
 	print_eqc_arr();
 
-	EM(t_lengths, 0.01);
-
+	printf("\nRunning EM algorithm...\n");
+	EM(t_lengths, epsilon);
 
 	return 0;
 }
@@ -640,15 +747,27 @@ void EM(int *lengths, double eps){
 	}
 
 	double diff;
+	int iterations = 0;
 	do {
 		prev_llk = llk;
 		update_parameters(alpha, probs, lengths, transcirpt_prob);
 		llk = likelihood(alpha, lengths);
 		diff = fabs(llk - prev_llk);
-fprintf(stderr, "%f %f: %f (%e)\n", alpha[0]/lengths[0], alpha[1]/lengths[1], llk, diff);
+		iterations++;
+		if (iterations % 10 == 0) {
+			fprintf(stderr, "Iteration %d: llk = %f, diff = %e\n", iterations, llk, diff);
+		}
 	} while(diff > eps);
+	
+	printf("\nEM converged after %d iterations\n", iterations);
+	printf("Final log-likelihood: %f\n", llk);
 
-	// This is the output of the EM
+	// Write abundances to output file
+	if (g_output_file) {
+		write_abundances(g_output_file, probs);
+	}
+	
+	// This is the output of the EM (for validation if real.txt exists)
 	compare(probs);
 	/*
 	for(int i = 0; i <= num_t; i++){
@@ -779,15 +898,28 @@ void free_hashTable(){
 // This method calculate the mean squared error
 void compare(double *probs){
 
-
 	FILE * tscripts_filep = fopen("real.txt", "r");
+	if (!tscripts_filep) {
+		fprintf(stderr, "Warning: Could not open real.txt for comparison\n");
+		return;
+	}
+	
 	char n[15];
 	int d1;
 	int *d = malloc(num_t * sizeof(int));
+	if (!d) {
+		fprintf(stderr, "Error: Failed to allocate memory for comparison\n");
+		fclose(tscripts_filep);
+		return;
+	}
+	
 	int tot = 0;
 
 	for(int i = 0; i < num_t; i++){
-		fscanf(tscripts_filep, "%s %d %d", n, &d1, &d[i]);
+		if (fscanf(tscripts_filep, "%s %d %d", n, &d1, &d[i]) != 3) {
+			fprintf(stderr, "Warning: Error reading real.txt at line %d\n", i);
+			break;
+		}
 		tot += d[i];
 	}
 
@@ -802,8 +934,42 @@ void compare(double *probs){
 
 	printf("The MSE is %lf\n", (error/num_t));
 
-
+	free(d);
 	fclose(tscripts_filep);
-
 }
+
+// Write transcript abundances to output file in TSV format
+void write_abundances(const char *output_file, double *probs) {
+	FILE *out = fopen(output_file, "w");
+	if (!out) {
+		fprintf(stderr, "Error: Could not open output file '%s'\n", output_file);
+		return;
+	}
+	
+	// Write header
+	fprintf(out, "target_id\tlength\teff_length\test_counts\ttpm\n");
+	
+	// Calculate total TPM
+	double total_tpm = 0;
+	for (int i = 1; i <= num_t; i++) {
+		total_tpm += probs[i];
+	}
+	
+	// Write each transcript
+	for (int i = 1; i <= num_t; i++) {
+		double tpm = (total_tpm > 0) ? (probs[i] / total_tpm) * 1000000.0 : 0;
+		double est_counts = probs[i] * t_lengths[i - 1];
+		
+		fprintf(out, "%s\t%d\t%d\t%.2f\t%.4f\n", 
+			t_names[i], 
+			t_lengths[i - 1],
+			t_lengths[i - 1],  // effective length (simplified, same as length)
+			est_counts,
+			tpm);
+	}
+	
+	fclose(out);
+	printf("Abundances written to %s\n", output_file);
+}
+
 

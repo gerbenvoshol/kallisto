@@ -1,0 +1,35 @@
+# Build artifacts
+*.o
+kallisto
+binary_convert
+
+# Data files
+*.bin
+*.fasta
+*.fastq
+*.fa
+*.fq
+*.txt
+simdata/
+
+# Output files
+*.tsv
+abundances.*
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Debug files
+*.dSYM/
+*.gch
+*.pch
+
+# Compressed files
+*.gz
+*.zip
+*.tar
