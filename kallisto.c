@@ -44,6 +44,7 @@ void create_htable(char * tscripts_file);
 void store_read_counts(char * reads_file, int max_reads);
 void store_paired_read_counts(char * reads_file1, char * reads_file2, int max_reads);
 int * get_equiv_class(char* kmer);
+// Compute intersection of multiple equivalence classes (returns transcripts present in ALL classes)
 int * compute_eq_class_intersection(int **eq_classes, int num_classes);
 void store_eqiv_classes();
 uint32_t murmurhash (const char *key, uint32_t len, uint32_t seed);
@@ -591,8 +592,8 @@ void store_read_counts(char * reads_file, int max_reads)
 			if (num_matched > 0) {
 				int *intersection = compute_eq_class_intersection(eq_classes, num_matched);
 				if (intersection && intersection[0] != -1) {
-					// Increment count for the first k-mer that was found
-					// (which now represents the intersection)
+					// Increment count for the k-mer at position kmer_positions[0]
+					// This k-mer now represents the read's intersection equivalence class
 					char* first_kmer = malloc((k + 1) * sizeof(char));
 					if (first_kmer) {
 						strncpy(first_kmer, seq->seq.s + kmer_positions[0], k);
