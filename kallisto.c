@@ -257,12 +257,12 @@ int count_transcripts_and_kmers(char *file, int *total_kmers){
 	}
 	
 	kseq_t *seq = kseq_init(fp);
-	int n_seqs = 0;
+	int n_transcripts = 0;
 	int n_kmers = 0;
 	int64_t l;
 	
 	while ((l = kseq_read(seq)) >= 0) {
-		n_seqs++;
+		n_transcripts++;
 		int seq_len = seq->seq.l;
 		if (seq_len >= k) {
 			n_kmers += seq_len - k + 1;
@@ -273,10 +273,10 @@ int count_transcripts_and_kmers(char *file, int *total_kmers){
 	gzclose(fp);
 	
 	*total_kmers = n_kmers;
-	printf("Number of transcripts = %d\n", n_seqs);
+	printf("Number of transcripts = %d\n", n_transcripts);
 	printf("Estimated total k-mers = %d\n", n_kmers);
 	
-	return n_seqs;
+	return n_transcripts;
 }
 
 
