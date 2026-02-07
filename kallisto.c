@@ -65,7 +65,7 @@ double likelihood(double *alpha, int *lengths);
 // Data structure for parallel computation
 typedef struct {
 	double *alpha;
-	double **transcirpt_prob;
+	double **transcript_prob;
 	double *probs;
 	int *lengths;
 } em_data_t;
@@ -727,7 +727,7 @@ static void worker_update_alphas(void *data, long k, int tid) {
 	
 	for(int i = 1; i < num_eqc_found; i++){
 		// KSD correction: multiply by count
-		sum += eqc_arr[i].count * em_data->transcirpt_prob[i][k];
+		sum += eqc_arr[i].count * em_data->transcript_prob[i][k];
 	}
 	
 	em_data->alpha[k] = sum/num_eqc_found;
@@ -749,7 +749,7 @@ static void worker_update_trans_probs(void *data, long idx, int tid) {
 	}
 	
 	for(int k = 0; k < j; k++)
-		em_data->transcirpt_prob[i][eqc_arr[i].eq_class_labels[k]] = em_data->probs[eqc_arr[i].eq_class_labels[k]] / sum;
+		em_data->transcript_prob[i][eqc_arr[i].eq_class_labels[k]] = em_data->probs[eqc_arr[i].eq_class_labels[k]] / sum;
 }
 
 // This is our implementation of the EM algorithm
